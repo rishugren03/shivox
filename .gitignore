@@ -1,0 +1,64 @@
+# Dependencies
+node_modules/
+/.pnp
+.pnp.js
+
+# Environment variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+*.env
+
+# Build & Output directories
+dist/
+dist-ssr/
+build/
+out/
+
+# Database files
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+*.sqlite-journal
+prisma/dev.db
+backend/prisma/dev.db
+/generated/prisma
+
+# Uploads & User Files
+uploads/
+backend/uploads/
+
+# Logs & Temporary files
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+lerna-debug.log*
+.tmp/
+tmp/
+
+# Testing & Browser Automation
+test-results/
+playwright-report/
+blob-report/
+.playwright/
+
+# Editor, Agent & System Files
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+.windsurf/
+.claude/
+.agent/
+.agents/

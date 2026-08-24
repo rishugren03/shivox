@@ -1,0 +1,97 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Company {
+  id               String   @id @default(cuid())
+  name             String
+  atsType          String   // greenhouse | lever | ashby
+  boardTokenOrSlug String
+  active           Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  jobs             Job[]
+}
+
+model Job {
+  id           String        @id @default(cuid())
+  companyId    String
+  company      Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  externalId   String
+  title        String
+  description  String
+  location     String?
+  url          String
+  atsType      String        // greenhouse | lever | ashby
+  postedAt     DateTime?
+  firstSeenAt  DateTime      @default(now())
+  closed       Boolean       @default(false)
+  rawJson      String?
+  embedding    String?
+  applications Application[]
+
+  @@unique([companyId, externalId])
+}
+
+model UserProfile {
+  id                 String        @id @default(cuid())
+  email              String?       @unique
+  passwordHash       String?
+  fullName           String?
+  phone              String?
+  linkedinUrl        String?
+  githubUrl          String?
+  portfolioUrl       String?
+  location           String?
+  resumeText         String?
+  resumeJson         String?
+  resumeFileUrl      String?
+  embedding          String?
+  // Job Preferences & Work Eligibility
+  targetJobTitles    String?       // JSON string array e.g. ["AI Engineer", "Voice AI Engineer"]
+  preferredLocations String?       // JSON string array e.g. ["Remote", "San Francisco, CA"]
+  remotePreference   String?       @default("any") // "remote_only" | "hybrid" | "onsite" | "any"
+  experienceLevel    String?       @default("Mid-Senior") // "Entry" | "Mid-Senior" | "Lead / Staff" | "Founder"
+  minSalary          Int?          @default(120000)
+  preferredSkills    String?       // JSON string array e.g. ["PyTorch", "LLMs", "Voice AI", "TypeScript"]
+  autoApplyEnabled   Boolean       @default(true)
+
+  // Work Eligibility & EEO Questions
+  legallyAuthorized  Boolean       @default(true)
+  requiresSponsorship Boolean      @default(false)
+  openToRelocation   Boolean       @default(true)
+  openToInPerson     Boolean       @default(true)
+  gender             String?       @default("Decline to self-identify")
+  race               String?       @default("Decline to self-identify")
+  veteranStatus      String?       @default("Decline to self-identify")
+  disabilityStatus   String?       @default("Decline to self-identify")
+
+  applications       Application[]
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+}
+
+model Application {
+  id            String      @id @default(cuid())
+  userId        String
+  user          UserProfile @relation(fields: [userId], references: [id], onDelete: Cascade)
+  jobId         String
+  job           Job         @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  status        String      // matched | passed | tailoring | pending_review | approved | submitted | failed | needs_manual_review
+  matchScore    Float?
+  matchReason   String?
+  tailoredJson  String?
+  coverNote     String?
+  submittedAt   DateTime?
+  screenshotUrl String?
+  errorMessage  String?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  @@unique([userId, jobId])
+}
