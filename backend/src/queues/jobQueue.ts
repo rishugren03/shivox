@@ -40,10 +40,10 @@ export async function scheduleRepeatingPolling() {
     {},
     {
       repeat: {
-        every: 3 * 60 * 60 * 1000,
+        pattern: '0 */3 * * *',
       },
       jobId: 'repeat-poll-all-companies',
-    }
+    } as any
   );
   console.log('[JobQueue] Scheduled repeating job aggregation every 3 hours.');
 }

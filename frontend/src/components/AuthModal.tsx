@@ -6,7 +6,7 @@ import type { UserProfile } from '../types';
 interface AuthModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSuccess: (user: UserProfile) => void;
+  onSuccess: (user: UserProfile, token?: string) => void;
 }
 
 export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess }) => {
@@ -31,6 +31,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
       const res = await axios.post(`http://localhost:5001${endpoint}`, payload);
       
       if (res.data.user) {
+        if (res.data.token) {
+          localStorage.setItem('tsenta_token', res.data.token);
+        }
         localStorage.setItem('tsenta_user_email', res.data.user.email);
         localStorage.setItem('tsenta_user_id', res.data.user.id);
         onSuccess(res.data.user);

@@ -1,18 +1,18 @@
-import express from 'express';
+import express, { Response } from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
-import pdfParse from 'pdf-parse';
+import bcrypt from 'bcryptjs';
 
 import { prisma } from './config/prisma';
 import { pollAllActiveCompanies } from './services/aggregator/poller';
-import { parseResumeWithClaude, generateMatchReason, tailorResumeForJob } from './services/ai/claude';
-import { calculateMatchScore } from './services/ai/embeddings';
+import { parseResumeWithOpenAI, generateMatchReason, tailorResumeForJob } from './services/ai/openai';
+import { calculateMatchScore, generateOpenAIEmbedding, computeCosineSimilarity } from './services/ai/embeddings';
 import { submitApplicationToATS } from './services/automation/submitter';
-
-import crypto from 'crypto';
+import { authenticateJWT, generateToken, AuthenticatedRequest } from './middleware/auth';
+import { applicationQueue, getQueueStatus } from './queues/applicationQueue';
 
 dotenv.config();
 
@@ -36,12 +36,7 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage });
 
-// Password hashing helper (Simple SHA-256 for local dev auth)
-function hashPassword(password: string): string {
-  return crypto.createHash('sha256').update(password).digest('hex');
-}
-
-// PDF Text Extraction Helper (fixes pdf-parse v2 issues & prevents 500 errors)
+// PDF Text Extraction Helper
 async function extractTextFromPdf(dataBuffer: Buffer): Promise<string> {
   try {
     const { PDFParse } = await import('pdf-parse');
@@ -72,55 +67,20 @@ async function extractTextFromPdf(dataBuffer: Buffer): Promise<string> {
   return '';
 }
 
-// Helper to get or create default founder profile or fetch user from request headers
-async function getUserFromReq(req: express.Request) {
-  const userIdHeader = req.headers['x-user-id'] as string;
-  const userEmailHeader = req.headers['x-user-email'] as string;
-
-  if (userIdHeader) {
-    const user = await prisma.userProfile.findUnique({ where: { id: userIdHeader } });
-    if (user) return user;
-  }
-  if (userEmailHeader) {
-    const user = await prisma.userProfile.findFirst({ where: { email: userEmailHeader } });
-    if (user) return user;
-  }
-
-  // Fallback to default user profile
+// Helper to extract or fallback user profile
+async function getOrInitUser(req: AuthenticatedRequest) {
+  if (req.user) return req.user;
   let user = await prisma.userProfile.findFirst();
   if (!user) {
+    const salt = await bcrypt.genSalt(10);
+    const passwordHash = await bcrypt.hash('password123', salt);
     user = await prisma.userProfile.create({
       data: {
-        fullName: 'Alex Founder',
-        email: 'alex@founder.ai',
-        passwordHash: hashPassword('password123'),
+        fullName: 'Alex Candidate',
+        email: 'alex@candidate.ai',
+        passwordHash,
         phone: '555-019-2831',
-        linkedinUrl: 'https://linkedin.com/in/alex-founder',
-        githubUrl: 'https://github.com/alex-founder',
-        portfolioUrl: 'https://alexfounder.ai',
-        location: 'San Francisco, CA',
-        resumeText: 'AI Engineer & Founder with expertise in PyTorch, LLMs, Voice AI, LangChain, Vapi, and Playwright automation.',
-        resumeJson: JSON.stringify({
-          skills: ['Python', 'PyTorch', 'LLMs', 'Voice AI', 'TypeScript', 'Node.js', 'PostgreSQL', 'BullMQ'],
-          experience: [
-            {
-              company: 'Voice AI Studio',
-              role: 'Founder & AI Engineer',
-              dates: '2024 - Present',
-              bullets: [
-                'Engineered low-latency voice AI agents with Vapi and LiveKit.',
-                'Deployed fine-tuned models and high-throughput vector search.',
-              ],
-            },
-          ],
-        }),
-        embedding: '[]',
-        targetJobTitles: JSON.stringify(['AI Engineer', 'Voice AI Specialist', 'Fullstack AI Engineer']),
-        preferredLocations: JSON.stringify(['Remote', 'San Francisco, CA']),
-        remotePreference: 'any',
-        experienceLevel: 'Mid-Senior',
-        minSalary: 140000,
-        preferredSkills: JSON.stringify(['PyTorch', 'LLMs', 'Voice AI', 'TypeScript', 'PostgreSQL']),
+        isOnboardingComplete: false,
         autoApplyEnabled: true,
       },
     });
@@ -128,16 +88,48 @@ async function getUserFromReq(req: express.Request) {
   return user;
 }
 
+// SSE Clients List for real-time status pushing
+let sseClients: Response[] = [];
+
+function broadcastSSEUpdate(data: any) {
+  sseClients.forEach((client) => {
+    client.write(`data: ${JSON.stringify(data)}\n\n`);
+  });
+}
+
 // ----------------------------------------------------
 // ROUTES
 // ----------------------------------------------------
 
-// 1. Healthcheck
+// 1. Healthcheck & Queue Status
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', time: new Date() });
 });
 
-// 2. Auth Routes (Register, Login, Me)
+app.get('/api/queue/status', async (req, res) => {
+  try {
+    const metrics = await getQueueStatus();
+    res.json({ success: true, metrics });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 2. SSE Real-Time Updates Endpoint
+app.get('/api/applications/stream', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+
+  sseClients.push(res);
+  res.write(`data: ${JSON.stringify({ type: 'connected' })}\n\n`);
+
+  req.on('close', () => {
+    sseClients = sseClients.filter((c) => c !== res);
+  });
+});
+
+// 3. Auth Routes (Register, Login, Me)
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { email, password, fullName } = req.body;
@@ -150,22 +142,27 @@ app.post('/api/auth/register', async (req, res) => {
       return res.status(400).json({ error: 'User with this email already exists' });
     }
 
+    const salt = await bcrypt.genSalt(10);
+    const passwordHash = await bcrypt.hash(password, salt);
+
     const newUser = await prisma.userProfile.create({
       data: {
         email,
-        passwordHash: hashPassword(password),
+        passwordHash,
         fullName: fullName || email.split('@')[0],
-        targetJobTitles: JSON.stringify(['AI Engineer', 'Voice AI Specialist']),
+        isOnboardingComplete: false,
+        targetJobTitles: JSON.stringify(['Software Engineer', 'Voice AI Specialist', 'Fullstack Engineer']),
         preferredLocations: JSON.stringify(['Remote', 'San Francisco, CA']),
         remotePreference: 'any',
         experienceLevel: 'Mid-Senior',
         minSalary: 120000,
-        preferredSkills: JSON.stringify(['Python', 'PyTorch', 'LLMs', 'Voice AI']),
+        preferredSkills: JSON.stringify(['Python', 'PyTorch', 'TypeScript', 'Voice AI']),
         autoApplyEnabled: true,
       },
     });
 
-    res.json({ success: true, user: newUser });
+    const token = generateToken(newUser);
+    res.json({ success: true, user: newUser, token });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -179,27 +176,47 @@ app.post('/api/auth/login', async (req, res) => {
     }
 
     const user = await prisma.userProfile.findUnique({ where: { email } });
-    if (!user || user.passwordHash !== hashPassword(password)) {
+    if (!user || !user.passwordHash) {
       return res.status(401).json({ error: 'Invalid email or password' });
     }
 
-    res.json({ success: true, user });
+    const isMatch = await bcrypt.compare(password, user.passwordHash);
+    if (!isMatch) {
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+
+    const token = generateToken(user);
+    res.json({ success: true, user, token });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.get('/api/auth/me', async (req, res) => {
+app.get('/api/auth/me', authenticateJWT, async (req: AuthenticatedRequest, res) => {
   try {
-    const user = await getUserFromReq(req);
+    const user = await getOrInitUser(req);
     res.json({ user });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// 3. Poll job boards on-demand
-app.post('/api/jobs/poll', async (req, res) => {
+// Complete Onboarding
+app.post('/api/user/onboarding/complete', authenticateJWT, async (req: AuthenticatedRequest, res) => {
+  try {
+    const user = await getOrInitUser(req);
+    const updated = await prisma.userProfile.update({
+      where: { id: user.id },
+      data: { isOnboardingComplete: true },
+    });
+    res.json({ success: true, profile: updated });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 4. Poll job boards on-demand
+app.post('/api/jobs/poll', authenticateJWT, async (req, res) => {
   try {
     const stats = await pollAllActiveCompanies();
     res.json({ success: true, stats });
@@ -208,68 +225,76 @@ app.post('/api/jobs/poll', async (req, res) => {
   }
 });
 
-// 4. Get Swipe Deck Jobs (Ranked by Resume & Job Preferences)
-app.get('/api/jobs/deck', async (req, res) => {
+// 5. Get Swipe Deck Jobs (Sorted by Percent Matches for User Profile)
+app.get('/api/jobs/deck', authenticateJWT, async (req: AuthenticatedRequest, res) => {
   try {
-    const user = await getUserFromReq(req);
+    const user = await getOrInitUser(req);
+    const category = (req.query.category as string) || 'fulltime';
 
-    // Fetch existing applications to exclude swiped jobs
     const existingApps = await prisma.application.findMany({
       where: { userId: user.id },
       select: { jobId: true },
     });
     const swipedJobIds = new Set(existingApps.map((a) => a.jobId));
 
+    // Fetch all active/unclosed jobs across all companies for requested category
     const jobs = await prisma.job.findMany({
-      where: { closed: false },
+      where: { closed: false, category },
       include: { company: true },
-      orderBy: { firstSeenAt: 'desc' },
-      take: 100,
     });
 
     const unswiped = jobs.filter((j) => !swipedJobIds.has(j.id));
     const userResumeText = JSON.stringify(user.resumeJson || user.resumeText || '');
     const userTargetTitles: string[] = user.targetJobTitles ? JSON.parse(user.targetJobTitles) : [];
     const userSkills: string[] = user.preferredSkills ? JSON.parse(user.preferredSkills) : [];
+    const userLocations: string[] = user.preferredLocations ? JSON.parse(user.preferredLocations) : [];
+    const now = new Date().getTime();
 
-    // Calculate match scores using both resume content and target preferences
     const deck = unswiped.map((job) => {
       let score = calculateMatchScore(userResumeText, `${job.title} ${job.description}`);
 
-      // Preference bonus: title match
       if (userTargetTitles.some((t) => job.title.toLowerCase().includes(t.toLowerCase()))) {
         score += 15;
       }
-      // Preference bonus: skill match
       const matchedSkills = userSkills.filter((s) =>
         job.description.toLowerCase().includes(s.toLowerCase())
       );
       score += matchedSkills.length * 5;
 
-      const finalScore = Math.min(Math.round(score), 99);
+      if (userLocations.length > 0 && userLocations.some((loc) => (job.location || 'Remote').toLowerCase().includes(loc.toLowerCase()))) {
+        score += 5;
+      }
+
+      // Freshness multiplier: posted within 24h = +10, 48h = +5
+      const ageHours = (now - new Date(job.firstSeenAt).getTime()) / (1000 * 60 * 60);
+      let freshnessBonus = 0;
+      if (ageHours <= 24) freshnessBonus = 10;
+      else if (ageHours <= 48) freshnessBonus = 5;
+
+      const finalScore = Math.min(Math.round(score + freshnessBonus), 99);
 
       return {
         ...job,
         matchScore: finalScore,
+        isFresh: ageHours <= 24,
         whyFit: matchedSkills.length > 0
-          ? `Matches target role preferences and skills in ${matchedSkills.slice(0, 3).join(', ')}.`
-          : `Great fit for your AI/ML background and technical preferences.`,
+          ? `Matches target preferences & skills in ${matchedSkills.slice(0, 3).join(', ')}.`
+          : `High match for your candidate profile & skills.`,
       };
     });
 
-    // Sort by highest match score
+    // Sort ALL available jobs strictly descending by percent match score (Highest match first)
     deck.sort((a, b) => b.matchScore - a.matchScore);
-
     res.json({ jobs: deck });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// 5. Upload & Parse Resume (FIXED: extractTextFromPdf prevents 500 errors)
-app.post('/api/resume/upload', upload.single('resume'), async (req, res) => {
+// 6. Upload & Version Resume
+app.post('/api/resume/upload', authenticateJWT, upload.single('resume'), async (req: AuthenticatedRequest, res) => {
   try {
-    const user = await getUserFromReq(req);
+    const user = await getOrInitUser(req);
     let textContent = '';
 
     if (req.file) {
@@ -285,71 +310,127 @@ app.post('/api/resume/upload', upload.single('resume'), async (req, res) => {
 
     let parsedJson: any = {};
     if (textContent.trim()) {
-      parsedJson = await parseResumeWithClaude(textContent);
+      parsedJson = await parseResumeWithOpenAI(textContent);
     } else {
       parsedJson = {
         fullName: user.fullName,
         email: user.email,
         phone: user.phone,
-        skills: ['Python', 'PyTorch', 'LLMs', 'Voice AI', 'TypeScript', 'PostgreSQL'],
+        skills: ['Python', 'TypeScript', 'Voice AI', 'React', 'Node.js'],
         experience: [],
       };
     }
 
-    const updatedUser = await prisma.userProfile.update({
-      where: { id: user.id },
+    // Generate real OpenAI vector embedding
+    const embeddingVector = await generateOpenAIEmbedding(textContent || JSON.stringify(parsedJson));
+
+    // Deactivate previous resume versions
+    await prisma.resumeVersion.updateMany({
+      where: { userId: user.id },
+      data: { isActive: false },
+    });
+
+    const fileUrl = req.file ? `/uploads/${req.file.filename}` : user.resumeFileUrl || '';
+
+    // Create new active ResumeVersion
+    const resumeVersion = await prisma.resumeVersion.create({
       data: {
-        fullName: parsedJson.fullName || user.fullName,
-        email: parsedJson.email || user.email,
-        phone: parsedJson.phone || user.phone,
-        linkedinUrl: parsedJson.linkedinUrl || user.linkedinUrl,
-        githubUrl: parsedJson.githubUrl || user.githubUrl,
-        portfolioUrl: parsedJson.portfolioUrl || user.portfolioUrl,
-        location: parsedJson.location || user.location,
-        resumeText: textContent || user.resumeText,
+        userId: user.id,
+        fileUrl,
+        fileName: req.file ? req.file.originalname : 'Resume.pdf',
+        resumeText: textContent,
         resumeJson: JSON.stringify(parsedJson),
-        resumeFileUrl: req.file ? `/uploads/${req.file.filename}` : user.resumeFileUrl,
+        embedding: JSON.stringify(embeddingVector),
+        isActive: true,
       },
     });
 
-    res.json({ success: true, profile: updatedUser });
+    // Update UserProfile active resume metadata (preserve account email)
+    const updatedUser = await prisma.userProfile.update({
+      where: { id: user.id },
+      data: {
+        fullName: user.fullName || parsedJson.fullName,
+        phone: parsedJson.phone || user.phone,
+        location: parsedJson.location || user.location,
+        resumeText: textContent || user.resumeText,
+        resumeJson: JSON.stringify(parsedJson),
+        resumeFileUrl: fileUrl,
+        embedding: JSON.stringify(embeddingVector),
+      },
+    });
+
+    res.json({ success: true, profile: updatedUser, resumeVersion });
   } catch (err: any) {
     console.error('[ResumeUpload] Error:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// 6. Get User Profile & Job Preferences
-app.get('/api/user/profile', async (req, res) => {
+// Get User Resume Versions
+app.get('/api/resume/versions', authenticateJWT, async (req: AuthenticatedRequest, res) => {
   try {
-    const user = await getUserFromReq(req);
+    const user = await getOrInitUser(req);
+    const versions = await prisma.resumeVersion.findMany({
+      where: { userId: user.id },
+      orderBy: { uploadedAt: 'desc' },
+    });
+    res.json({ versions });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Activate a Resume Version
+app.post('/api/resume/versions/:id/activate', authenticateJWT, async (req: AuthenticatedRequest, res) => {
+  try {
+    const user = await getOrInitUser(req);
+    const { id } = req.params;
+
+    await prisma.resumeVersion.updateMany({
+      where: { userId: user.id },
+      data: { isActive: false },
+    });
+
+    const targetVersion = await prisma.resumeVersion.update({
+      where: { id: id as string },
+      data: { isActive: true },
+    });
+
+    await prisma.userProfile.update({
+      where: { id: user.id },
+      data: {
+        resumeText: targetVersion.resumeText,
+        resumeJson: targetVersion.resumeJson,
+        resumeFileUrl: targetVersion.fileUrl,
+        embedding: targetVersion.embedding,
+      },
+    });
+
+    res.json({ success: true, activeVersion: targetVersion });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 7. Get User Profile & Preferences
+app.get('/api/user/profile', authenticateJWT, async (req: AuthenticatedRequest, res) => {
+  try {
+    const user = await getOrInitUser(req);
     res.json({ profile: user });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Update User Profile & Job Preferences
-app.put('/api/user/profile', async (req, res) => {
+app.put('/api/user/profile', authenticateJWT, async (req: AuthenticatedRequest, res) => {
   try {
-    const user = await getUserFromReq(req);
-
-    // Format array/JSON fields if passed as arrays
+    const user = await getOrInitUser(req);
     const payload = { ...req.body };
-    if (Array.isArray(payload.targetJobTitles)) {
-      payload.targetJobTitles = JSON.stringify(payload.targetJobTitles);
-    }
-    if (Array.isArray(payload.preferredLocations)) {
-      payload.preferredLocations = JSON.stringify(payload.preferredLocations);
-    }
-    if (Array.isArray(payload.preferredSkills)) {
-      payload.preferredSkills = JSON.stringify(payload.preferredSkills);
-    }
-    if (payload.minSalary !== undefined) {
-      payload.minSalary = parseInt(payload.minSalary, 10) || 0;
-    }
+    if (Array.isArray(payload.targetJobTitles)) payload.targetJobTitles = JSON.stringify(payload.targetJobTitles);
+    if (Array.isArray(payload.preferredLocations)) payload.preferredLocations = JSON.stringify(payload.preferredLocations);
+    if (Array.isArray(payload.preferredSkills)) payload.preferredSkills = JSON.stringify(payload.preferredSkills);
+    if (payload.minSalary !== undefined) payload.minSalary = parseInt(payload.minSalary, 10) || 0;
 
-    // Remove immutable fields if present
     delete payload.id;
     delete payload.passwordHash;
     delete payload.createdAt;
@@ -365,11 +446,11 @@ app.put('/api/user/profile', async (req, res) => {
   }
 });
 
-// 6. Swipe Action (Right = tailoring/pending_review; Left = passed)
-app.post('/api/applications/swipe', async (req, res) => {
+// 8. ASYNC Swipe Right Handler (Non-Blocking BullMQ Job Enqueue)
+app.post('/api/applications/swipe', authenticateJWT, async (req: AuthenticatedRequest, res) => {
   try {
-    const { jobId, action } = req.body; // action = 'right' | 'left'
-    const user = await getUserFromReq(req);
+    const { jobId, action } = req.body;
+    const user = await getOrInitUser(req);
 
     const job = await prisma.job.findUnique({
       where: { id: jobId },
@@ -382,165 +463,181 @@ app.post('/api/applications/swipe', async (req, res) => {
 
     if (action === 'left') {
       const appRecord = await prisma.application.upsert({
-        where: {
-          userId_jobId: { userId: user.id, jobId },
-        },
-        create: {
-          userId: user.id,
-          jobId,
-          status: 'passed',
-        },
-        update: {
-          status: 'passed',
-        },
+        where: { userId_jobId: { userId: user.id, jobId } },
+        create: { userId: user.id, jobId, status: 'passed' },
+        update: { status: 'passed' },
       });
       return res.json({ success: true, application: appRecord });
     }
 
-    // Swipe Right: Generate match reason & tailored materials
-    const userResumeText = JSON.stringify(user.resumeJson || user.resumeText || '');
-    const matchScore = calculateMatchScore(userResumeText, `${job.title} ${job.description}`);
-    const matchReason = await generateMatchReason(user.resumeJson || {}, job.title, job.description);
-    const tailored = await tailorResumeForJob(user.resumeJson || {}, job.title, job.description);
+    // GAP 2 ENFORCEMENT: Block swipe right if candidate has no active resume
+    if (!user.resumeText && !user.resumeJson && !user.resumeFileUrl) {
+      return res.status(400).json({
+        error: 'Master resume required. Please upload your resume in Profile before applying to jobs.',
+      });
+    }
 
+    // Create record in 'queued' status
     const appRecord = await prisma.application.upsert({
-      where: {
-        userId_jobId: { userId: user.id, jobId },
-      },
+      where: { userId_jobId: { userId: user.id, jobId } },
       create: {
         userId: user.id,
         jobId,
-        status: 'pending_review',
-        matchScore,
-        matchReason,
-        tailoredJson: JSON.stringify(tailored.tailoredBullets),
-        coverNote: tailored.coverNote,
+        status: 'queued',
       },
       update: {
-        status: 'pending_review',
-        matchScore,
-        matchReason,
-        tailoredJson: JSON.stringify(tailored.tailoredBullets),
-        coverNote: tailored.coverNote,
+        status: 'queued',
       },
     });
 
-    res.json({ success: true, application: appRecord });
+    // Enqueue BullMQ background tailoring job
+    await applicationQueue.add('tailor-application', {
+      applicationId: appRecord.id,
+      autoSubmit: user.autoApplyEnabled,
+    });
+
+    broadcastSSEUpdate({ type: 'application_queued', applicationId: appRecord.id, jobId });
+
+    // Respond immediately to unblock UI thread
+    res.json({
+      success: true,
+      application: appRecord,
+      message: '⚡ Application queued for background tailoring & submission.',
+    });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// 7. Approve Application for submission
-app.post('/api/applications/:id/approve', async (req, res) => {
+// 9. Paginated Applications List (Tracker - excludes passed/skipped)
+app.get('/api/applications', authenticateJWT, async (req: AuthenticatedRequest, res) => {
   try {
-    const { id } = req.params;
-    const { coverNote, tailoredBullets } = req.body;
+    const user = await getOrInitUser(req);
+    const page = parseInt(req.query.page as string, 10) || 1;
+    const limit = parseInt(req.query.limit as string, 10) || 50;
+    const skip = (page - 1) * limit;
 
-    const updated = await prisma.application.update({
-      where: { id },
-      data: {
-        status: 'approved',
-        coverNote: coverNote || undefined,
-        tailoredJson: tailoredBullets ? JSON.stringify(tailoredBullets) : undefined,
-      },
+    const [apps, total] = await Promise.all([
+      prisma.application.findMany({
+        where: { userId: user.id, status: { not: 'passed' } },
+        include: { job: { include: { company: true } } },
+        orderBy: { updatedAt: 'desc' },
+        skip,
+        take: limit,
+      }),
+      prisma.application.count({ where: { userId: user.id, status: { not: 'passed' } } }),
+    ]);
+
+    res.json({
+      applications: apps,
+      pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
     });
-
-    res.json({ success: true, application: updated });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// 8. Auto-Submit Application via Playwright
-app.post('/api/applications/:id/submit', async (req, res) => {
+// 9b. Skipped Postings List
+app.get('/api/applications/skipped', authenticateJWT, async (req: AuthenticatedRequest, res) => {
   try {
-    const { id } = req.params;
-    const application = await prisma.application.findUnique({
-      where: { id },
-      include: { job: { include: { company: true } }, user: true },
-    });
-
-    if (!application) {
-      return res.status(404).json({ error: 'Application not found' });
-    }
-
-    const { job, user } = application;
-    const applicantInfo = {
-      fullName: user.fullName || 'Alex Founder',
-      email: user.email || 'alex@founder.ai',
-      phone: user.phone || '555-019-2831',
-      linkedinUrl: user.linkedinUrl || '',
-      githubUrl: user.githubUrl || '',
-      portfolioUrl: user.portfolioUrl || '',
-      location: user.location || 'San Francisco, CA',
-      coverNote: application.coverNote || '',
-      resumePath: user.resumeFileUrl ? path.join(__dirname, '..', user.resumeFileUrl) : undefined,
-      legallyAuthorized: user.legallyAuthorized ?? true,
-      requiresSponsorship: user.requiresSponsorship ?? false,
-      openToRelocation: user.openToRelocation ?? true,
-      openToInPerson: user.openToInPerson ?? true,
-      gender: user.gender || 'Decline to self-identify',
-      race: user.race || 'Decline to self-identify',
-      veteranStatus: user.veteranStatus || 'Decline to self-identify',
-      disabilityStatus: user.disabilityStatus || 'Decline to self-identify',
-    };
-
-    const isDryRun = req.body.dryRun === true;
-    console.log(`[AutoSubmit] Submitting application ${id} for ${job.title} at ${job.company.name} (dryRun=${isDryRun})`);
-
-    const submission = await submitApplicationToATS(
-      job.atsType,
-      job.url,
-      applicantInfo,
-      isDryRun
-    );
-
-    if (submission.success) {
-      const updated = await prisma.application.update({
-        where: { id },
-        data: {
-          status: 'submitted',
-          submittedAt: submission.submittedAt || new Date(),
-          screenshotUrl: submission.screenshotUrl,
-        },
-      });
-      return res.json({ success: true, application: updated, submission });
-    } else {
-      const updated = await prisma.application.update({
-        where: { id },
-        data: {
-          status: 'failed',
-          errorMessage: submission.error,
-        },
-      });
-      return res.status(400).json({ success: false, application: updated, error: submission.error });
-    }
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// 9. Get Applications List (Tracker)
-app.get('/api/applications', async (req, res) => {
-  try {
-    const user = await getUserFromReq(req);
-    const apps = await prisma.application.findMany({
-      where: { userId: user.id },
-      include: {
-        job: {
-          include: { company: true },
-        },
-      },
+    const user = await getOrInitUser(req);
+    const skippedApps = await prisma.application.findMany({
+      where: { userId: user.id, status: 'passed' },
+      include: { job: { include: { company: true } } },
       orderBy: { updatedAt: 'desc' },
     });
-    res.json({ applications: apps });
+
+    const userResumeText = JSON.stringify(user.resumeJson || user.resumeText || '');
+    const userTargetTitles: string[] = user.targetJobTitles ? JSON.parse(user.targetJobTitles) : [];
+    const userSkills: string[] = user.preferredSkills ? JSON.parse(user.preferredSkills) : [];
+
+    const enriched = skippedApps.map((app) => {
+      const job = app.job;
+      let score = calculateMatchScore(userResumeText, `${job.title} ${job.description}`);
+      if (userTargetTitles.some((t) => job.title.toLowerCase().includes(t.toLowerCase()))) {
+        score += 15;
+      }
+      const matchedSkills = userSkills.filter((s) =>
+        job.description.toLowerCase().includes(s.toLowerCase())
+      );
+      score += matchedSkills.length * 5;
+      const finalScore = Math.min(Math.round(score), 99);
+
+      return {
+        ...app,
+        matchScore: app.matchScore || finalScore,
+        whyFit: matchedSkills.length > 0
+          ? `Matches target preferences & skills in ${matchedSkills.slice(0, 3).join(', ')}.`
+          : `Great fit for your technical background.`,
+      };
+    });
+
+    res.json({ skipped: enriched });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// 10. Seed Default Companies and Jobs on Startup
+// 9c. Restore / Unskip Posting (Removes 'passed' record so it reappears in deck)
+app.post('/api/applications/:id/unskip', authenticateJWT, async (req: AuthenticatedRequest, res) => {
+  try {
+    const user = await getOrInitUser(req);
+    const { id } = req.params;
+
+    const existing = await prisma.application.findFirst({
+      where: { id: id as string, userId: user.id, status: 'passed' },
+    });
+
+    if (!existing) {
+      return res.status(404).json({ error: 'Skipped application record not found' });
+    }
+
+    await prisma.application.delete({
+      where: { id: existing.id },
+    });
+
+    res.json({ success: true, message: 'Posting restored to Swipe Deck' });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 9d. Apply to Skipped Posting (Moves from 'passed' to 'queued' and triggers AI pipeline)
+app.post('/api/applications/:id/apply-skipped', authenticateJWT, async (req: AuthenticatedRequest, res) => {
+  try {
+    const user = await getOrInitUser(req);
+    const { id } = req.params;
+
+    if (!user.resumeText && !user.resumeJson && !user.resumeFileUrl) {
+      return res.status(400).json({
+        error: 'Master resume required. Please upload your resume in Profile before applying to jobs.',
+      });
+    }
+
+    const appRecord = await prisma.application.update({
+      where: { id: id as string },
+      data: { status: 'queued' },
+      include: { job: { include: { company: true } } },
+    });
+
+    await applicationQueue.add('tailor-application', {
+      applicationId: appRecord.id,
+      autoSubmit: user.autoApplyEnabled,
+    });
+
+    broadcastSSEUpdate({ type: 'application_queued', applicationId: appRecord.id, jobId: appRecord.jobId });
+
+    res.json({
+      success: true,
+      application: appRecord,
+      message: '⚡ Application queued for background tailoring & submission.',
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 10. Seed Companies & Poll
 app.post('/api/seed', async (req, res) => {
   try {
     const { seedCompanies } = await import('./scripts/seedCompanies');
@@ -553,5 +650,5 @@ app.post('/api/seed', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`[Server] AI/ML Job Auto-Apply API running on port ${PORT}`);
+  console.log(`[Server] Tsenta AI Job Application API running on port ${PORT}`);
 });

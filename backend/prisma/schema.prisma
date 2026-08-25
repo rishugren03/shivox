@@ -28,6 +28,7 @@ model Job {
   location     String?
   url          String
   atsType      String        // greenhouse | lever | ashby
+  category     String        @default("fulltime") // fulltime | internship
   postedAt     DateTime?
   firstSeenAt  DateTime      @default(now())
   closed       Boolean       @default(false)
@@ -39,8 +40,8 @@ model Job {
 }
 
 model UserProfile {
-  id                 String        @id @default(cuid())
-  email              String?       @unique
+  id                 String          @id @default(cuid())
+  email              String?         @unique
   passwordHash       String?
   fullName           String?
   phone              String?
@@ -52,28 +53,45 @@ model UserProfile {
   resumeJson         String?
   resumeFileUrl      String?
   embedding          String?
+  isOnboardingComplete Boolean       @default(false)
   // Job Preferences & Work Eligibility
-  targetJobTitles    String?       // JSON string array e.g. ["AI Engineer", "Voice AI Engineer"]
-  preferredLocations String?       // JSON string array e.g. ["Remote", "San Francisco, CA"]
-  remotePreference   String?       @default("any") // "remote_only" | "hybrid" | "onsite" | "any"
-  experienceLevel    String?       @default("Mid-Senior") // "Entry" | "Mid-Senior" | "Lead / Staff" | "Founder"
-  minSalary          Int?          @default(120000)
-  preferredSkills    String?       // JSON string array e.g. ["PyTorch", "LLMs", "Voice AI", "TypeScript"]
-  autoApplyEnabled   Boolean       @default(true)
+  targetJobTitles    String?         // JSON string array e.g. ["AI Engineer", "Voice AI Engineer"]
+  preferredLocations String?         // JSON string array e.g. ["Remote", "San Francisco, CA"]
+  remotePreference   String?         @default("any") // "remote_only" | "hybrid" | "onsite" | "any"
+  experienceLevel    String?         @default("Mid-Senior") // "Entry" | "Mid-Senior" | "Lead / Staff" | "Founder"
+  minSalary          Int?            @default(120000)
+  preferredSkills    String?         // JSON string array e.g. ["PyTorch", "LLMs", "Voice AI", "TypeScript"]
+  autoApplyEnabled   Boolean         @default(true)
 
   // Work Eligibility & EEO Questions
-  legallyAuthorized  Boolean       @default(true)
-  requiresSponsorship Boolean      @default(false)
-  openToRelocation   Boolean       @default(true)
-  openToInPerson     Boolean       @default(true)
-  gender             String?       @default("Decline to self-identify")
-  race               String?       @default("Decline to self-identify")
-  veteranStatus      String?       @default("Decline to self-identify")
-  disabilityStatus   String?       @default("Decline to self-identify")
+  legallyAuthorized  Boolean         @default(true)
+  requiresSponsorship Boolean        @default(false)
+  openToRelocation   Boolean         @default(true)
+  openToInPerson     Boolean         @default(true)
+  gender             String?         @default("Decline to self-identify")
+  race               String?         @default("Decline to self-identify")
+  veteranStatus      String?         @default("Decline to self-identify")
+  disabilityStatus   String?         @default("Decline to self-identify")
 
+  resumeVersions     ResumeVersion[]
   applications       Application[]
-  createdAt          DateTime      @default(now())
-  updatedAt          DateTime      @updatedAt
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+}
+
+model ResumeVersion {
+  id          String      @id @default(cuid())
+  userId      String
+  user        UserProfile @relation(fields: [userId], references: [id], onDelete: Cascade)
+  fileUrl     String
+  fileName    String
+  resumeText  String?
+  resumeJson  String?
+  embedding   String?
+  uploadedAt  DateTime    @default(now())
+  isActive    Boolean     @default(true)
+
+  @@index([userId])
 }
 
 model Application {
@@ -82,7 +100,7 @@ model Application {
   user          UserProfile @relation(fields: [userId], references: [id], onDelete: Cascade)
   jobId         String
   job           Job         @relation(fields: [jobId], references: [id], onDelete: Cascade)
-  status        String      // matched | passed | tailoring | pending_review | approved | submitted | failed | needs_manual_review
+  status        String      // queued | tailoring | pending_review | approved | submitted | replied | interview | failed | passed
   matchScore    Float?
   matchReason   String?
   tailoredJson  String?

@@ -2,7 +2,7 @@ import { prisma } from '../../config/prisma';
 import { fetchGreenhouseJobs } from './greenhouse';
 import { fetchLeverJobs } from './lever';
 import { fetchAshbyJobs } from './ashby';
-import { isAIMLJob } from './filter';
+import { isAIMLJob, categorizeJob } from './filter';
 import { RawFetchedJob } from './types';
 
 export async function pollCompanyJobs(companyId: string): Promise<{ added: number; updated: number; closed: number }> {
@@ -23,7 +23,7 @@ export async function pollCompanyJobs(companyId: string): Promise<{ added: numbe
     rawJobs = await fetchAshbyJobs(company.boardTokenOrSlug);
   }
 
-  // Filter for AI/ML relevant postings
+  // Filter for AI/ML and software relevant postings
   const filteredJobs = rawJobs.filter((job) => isAIMLJob(job.title, job.description));
   const fetchedExternalIds = new Set(filteredJobs.map((j) => j.externalId));
 
@@ -40,6 +40,8 @@ export async function pollCompanyJobs(companyId: string): Promise<{ added: numbe
       },
     });
 
+    const category = categorizeJob(jobData.title, jobData.description);
+
     if (existing) {
       await prisma.job.update({
         where: { id: existing.id },
@@ -48,6 +50,7 @@ export async function pollCompanyJobs(companyId: string): Promise<{ added: numbe
           description: jobData.description,
           location: jobData.location,
           url: jobData.url,
+          category,
           closed: false,
           rawJson: JSON.stringify(jobData.rawJson),
         },
@@ -63,6 +66,7 @@ export async function pollCompanyJobs(companyId: string): Promise<{ added: numbe
           location: jobData.location,
           url: jobData.url,
           atsType: company.atsType,
+          category,
           postedAt: jobData.postedAt,
           rawJson: JSON.stringify(jobData.rawJson),
           embedding: '[]',

@@ -1,13 +1,14 @@
 import React from 'react';
-import { Flame, CheckCircle2, User, RefreshCw, Bot } from 'lucide-react';
+import { Flame, CheckCircle2, User, RefreshCw, Bot, Archive } from 'lucide-react';
 import { motion } from 'framer-motion';
 
 interface HeaderProps {
-  activeTab: 'deck' | 'tracker' | 'profile';
-  setActiveTab: (tab: 'deck' | 'tracker' | 'profile') => void;
+  activeTab: 'deck' | 'tracker' | 'skipped' | 'profile';
+  setActiveTab: (tab: 'deck' | 'tracker' | 'skipped' | 'profile') => void;
   onPoll: () => void;
   polling: boolean;
   appCount: number;
+  skippedCount?: number;
   onOpenAuth: () => void;
   userEmail?: string;
 }
@@ -18,12 +19,14 @@ export const Header: React.FC<HeaderProps> = ({
   onPoll,
   polling,
   appCount,
+  skippedCount,
   onOpenAuth,
   userEmail,
 }) => {
   const tabs = [
     { id: 'deck' as const, label: 'Deck', icon: Flame },
     { id: 'tracker' as const, label: 'Tracker', icon: CheckCircle2, badge: appCount },
+    { id: 'skipped' as const, label: 'Skipped', icon: Archive, badge: skippedCount },
     { id: 'profile' as const, label: 'Profile', icon: User },
   ];
 
@@ -36,20 +39,29 @@ export const Header: React.FC<HeaderProps> = ({
           <div className="w-10 h-10 rounded-xl bg-red-50 flex items-center justify-center border border-red-200 shadow-xs shrink-0">
             <Bot className="w-5.5 h-5.5 text-red-600" />
           </div>
-          <button
-            onClick={onOpenAuth}
-            className="flex flex-col text-left hover:opacity-80 transition-opacity"
-          >
-            <div className="flex items-center gap-1.5">
-              <span className="text-xs sm:text-sm font-black text-neutral-900 leading-tight">Tsenta AI</span>
-              <span className="hidden sm:inline-flex px-1.5 py-0.5 rounded-md bg-neutral-100 border border-neutral-200 text-[10px] sm:text-xs font-mono font-bold text-neutral-600">
-                Studio
+          {userEmail ? (
+            <button
+              onClick={onOpenAuth}
+              className="flex flex-col text-left hover:opacity-80 transition-opacity"
+            >
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs sm:text-sm font-black text-neutral-900 leading-tight">Tsenta AI</span>
+                <span className="hidden sm:inline-flex px-1.5 py-0.5 rounded-md bg-neutral-100 border border-neutral-200 text-[10px] sm:text-xs font-mono font-bold text-neutral-600">
+                  Studio
+                </span>
+              </div>
+              <span className="text-xs font-bold text-red-600 truncate max-w-[110px] sm:max-w-[160px]">
+                {userEmail}
               </span>
-            </div>
-            <span className="text-xs font-bold text-red-600 truncate max-w-[110px] sm:max-w-[160px]">
-              {userEmail ? userEmail : 'Sign In'}
-            </span>
-          </button>
+            </button>
+          ) : (
+            <button
+              onClick={onOpenAuth}
+              className="px-3.5 py-1.5 rounded-xl bg-red-600 hover:bg-red-500 text-white font-extrabold text-xs shadow-md shadow-red-600/30 transition-all flex items-center gap-1.5"
+            >
+              <span>Sign In / Register</span>
+            </button>
+          )}
         </div>
 
         {/* Floating Tab Navigation */}

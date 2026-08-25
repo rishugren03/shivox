@@ -1,12 +1,17 @@
 import 'dotenv/config';
 import OpenAI from 'openai';
-import Anthropic from '@anthropic-ai/sdk';
 
 const openaiKey = process.env.OPENAI_API_KEY;
-const anthropicKey = process.env.ANTHROPIC_API_KEY;
+const baseURL = process.env.OPENAI_BASE_URL || process.env.OPENAI_API_BASE;
 
-const openai = openaiKey ? new OpenAI({ apiKey: openaiKey }) : null;
-const anthropic = anthropicKey ? new Anthropic({ apiKey: anthropicKey }) : null;
+const openai = openaiKey
+  ? new OpenAI({
+      apiKey: openaiKey,
+      ...(baseURL ? { baseURL } : {}),
+      timeout: 10000,
+      maxRetries: 1,
+    })
+  : null;
 
 export interface LLMCompletionOptions {
   prompt: string;
@@ -19,7 +24,6 @@ export interface LLMCompletionOptions {
 export async function generateLLMCompletion(options: LLMCompletionOptions): Promise<string> {
   const { prompt, systemPrompt, maxTokens = 1000, temperature = 0.7, jsonMode = false } = options;
 
-  // 1. Prioritize OpenAI if OPENAI_API_KEY is available
   if (openai) {
     console.log('[LLM] Invoking OpenAI API (gpt-4o-mini)...');
     try {
@@ -39,39 +43,21 @@ export async function generateLLMCompletion(options: LLMCompletionOptions): Prom
 
       return response.choices[0]?.message?.content || '';
     } catch (err: any) {
-      console.error('[LLM] OpenAI execution error:', err.message);
+      console.warn('[LLM] OpenAI execution error:', err.message);
+      throw new Error(`OpenAI completion failed (${err.message}).`);
     }
   }
 
-  // 2. Fall back to Anthropic Claude if ANTHROPIC_API_KEY is available
-  if (anthropic) {
-    console.log('[LLM] Invoking Anthropic Claude API (claude-3-5-sonnet)...');
-    try {
-      const response = await anthropic.messages.create({
-        model: 'claude-3-5-sonnet-20241022',
-        max_tokens: maxTokens,
-        temperature,
-        system: systemPrompt,
-        messages: [{ role: 'user', content: prompt }],
-      });
-
-      const textContent = response.content[0]?.type === 'text' ? response.content[0].text : '';
-      return textContent;
-    } catch (err: any) {
-      console.error('[LLM] Anthropic execution error:', err.message);
-    }
-  }
-
-  // 3. No LLM key available
-  throw new Error('No OPENAI_API_KEY or ANTHROPIC_API_KEY found in environment variables.');
+  throw new Error('No OPENAI_API_KEY set in environment variables.');
 }
+
 
 export function isLLMAvailable(): boolean {
-  return Boolean(openaiKey || anthropicKey);
+  return Boolean(openaiKey);
 }
 
-export function getActiveLLMProvider(): 'openai' | 'anthropic' | 'heuristic' {
+export function getActiveLLMProvider(): 'openai' | 'heuristic' {
   if (openaiKey) return 'openai';
-  if (anthropicKey) return 'anthropic';
   return 'heuristic';
 }
+

@@ -1,3 +1,17 @@
+import OpenAI from 'openai';
+
+const apiKey = process.env.OPENAI_API_KEY;
+const baseURL = process.env.OPENAI_BASE_URL || process.env.OPENAI_API_BASE;
+
+const openai = apiKey
+  ? new OpenAI({
+      apiKey,
+      ...(baseURL ? { baseURL } : {}),
+      timeout: 10000,
+      maxRetries: 1,
+    })
+  : null;
+
 export function computeCosineSimilarity(vecA: number[], vecB: number[]): number {
   if (!vecA.length || !vecB.length || vecA.length !== vecB.length) {
     return 0;
@@ -29,11 +43,30 @@ export function generateSimpleEmbedding(text: string, vocabulary: string[]): num
 
 export const CORE_VOCABULARY = [
   'ai', 'ml', 'llm', 'voice', 'speech', 'audio', 'nlp', 'agent', 'agentic',
-  'python', 'pytorch', 'tensorflow', 'typescript', 'node', 'react', 'postgres',
+  'python', 'pytorch', 'tensorflow', 'typescript', 'javascript', 'node', 'react', 'postgres',
   'redis', 'docker', 'aws', 'gcp', 'vapi', 'livekit', 'elevenlabs', 'langchain',
   'llamaindex', 'rag', 'embeddings', 'vector', 'playwright', 'scraping',
-  'architecture', 'fullstack', 'backend', 'frontend', 'deep learning',
+  'architecture', 'fullstack', 'backend', 'frontend', 'deep learning', 'express',
+  'fastapi', 'graphql', 'kubernetes', 'sql',
 ];
+
+export async function generateOpenAIEmbedding(text: string): Promise<number[]> {
+  if (!text || !text.trim()) return [];
+  if (!openai) {
+    return generateSimpleEmbedding(text, CORE_VOCABULARY);
+  }
+
+  try {
+    const response = await openai.embeddings.create({
+      model: 'text-embedding-3-small',
+      input: text.slice(0, 8000),
+    });
+    return response.data[0]?.embedding || [];
+  } catch (err: any) {
+    console.warn(`[EmbeddingService] OpenAI embedding error (${err.message}). Using local vocabulary vector fallback.`);
+    return generateSimpleEmbedding(text, CORE_VOCABULARY);
+  }
+}
 
 export function calculateMatchScore(resumeTextOrSkills: string, jobText: string): number {
   const resumeVec = generateSimpleEmbedding(resumeTextOrSkills, CORE_VOCABULARY);
@@ -45,3 +78,5 @@ export function calculateMatchScore(resumeTextOrSkills: string, jobText: string)
   const baseScore = Math.min(Math.max(similarity * 1.5, 0.45), 0.98);
   return Math.round(baseScore * 100);
 }
+
+

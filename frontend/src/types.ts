@@ -15,9 +15,23 @@ export interface Job {
   location?: string;
   url: string;
   atsType: string;
+  category?: 'fulltime' | 'internship';
   postedAt?: string;
+  firstSeenAt?: string;
+  isFresh?: boolean;
   matchScore: number;
   whyFit: string;
+}
+
+export interface ResumeVersion {
+  id: string;
+  userId: string;
+  fileUrl: string;
+  fileName: string;
+  resumeText?: string;
+  resumeJson?: string;
+  uploadedAt: string;
+  isActive: boolean;
 }
 
 export interface UserProfile {
@@ -32,6 +46,8 @@ export interface UserProfile {
   resumeText?: string;
   resumeJson?: any;
   resumeFileUrl?: string;
+  isOnboardingComplete?: boolean;
+  resumeVersions?: ResumeVersion[];
   // Job Preferences
   targetJobTitles?: string[] | string;
   preferredLocations?: string[] | string;
@@ -56,9 +72,10 @@ export interface Application {
   userId: string;
   jobId: string;
   job: Job;
-  status: 'matched' | 'passed' | 'tailoring' | 'pending_review' | 'approved' | 'submitted' | 'failed' | 'needs_manual_review';
+  status: 'queued' | 'tailoring' | 'pending_review' | 'approved' | 'submitted' | 'replied' | 'interview' | 'failed' | 'passed';
   matchScore?: number;
   matchReason?: string;
+  whyFit?: string;
   tailoredJson?: string[] | string;
   coverNote?: string;
   submittedAt?: string;
@@ -66,3 +83,4 @@ export interface Application {
   errorMessage?: string;
   updatedAt: string;
 }
+
