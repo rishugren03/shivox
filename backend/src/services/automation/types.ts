@@ -23,6 +23,11 @@ export interface ApplicantInfo {
 
 export interface SubmissionResult {
   success: boolean;
+  isConfirmed?: boolean;
+  requiresOtp?: boolean;
+  otpEmail?: string;
+  failureReason?: 'SPAM_FLAGGED' | 'VALIDATION_ERRORS' | 'RESUME_MISSING' | 'FORM_NOT_SUBMITTED' | 'UNKNOWN';
+  validationMessages?: string[];
   screenshotUrl?: string;
   error?: string;
   submittedAt?: Date;

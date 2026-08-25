@@ -91,7 +91,7 @@ async function getOrInitUser(req: AuthenticatedRequest) {
 // SSE Clients List for real-time status pushing
 let sseClients: Response[] = [];
 
-function broadcastSSEUpdate(data: any) {
+export function broadcastSSEUpdate(data: any) {
   sseClients.forEach((client) => {
     client.write(`data: ${JSON.stringify(data)}\n\n`);
   });
@@ -251,35 +251,33 @@ app.get('/api/jobs/deck', authenticateJWT, async (req: AuthenticatedRequest, res
     const now = new Date().getTime();
 
     const deck = unswiped.map((job) => {
-      let score = calculateMatchScore(userResumeText, `${job.title} ${job.description}`);
+      const matchResult = calculateMatchScore(userResumeText, `${job.title} ${job.description}`, {
+        jobTitle: job.title,
+        targetTitles: userTargetTitles,
+        userSkills,
+      });
 
-      if (userTargetTitles.some((t) => job.title.toLowerCase().includes(t.toLowerCase()))) {
-        score += 15;
-      }
-      const matchedSkills = userSkills.filter((s) =>
-        job.description.toLowerCase().includes(s.toLowerCase())
-      );
-      score += matchedSkills.length * 5;
-
-      if (userLocations.length > 0 && userLocations.some((loc) => (job.location || 'Remote').toLowerCase().includes(loc.toLowerCase()))) {
-        score += 5;
-      }
-
-      // Freshness multiplier: posted within 24h = +10, 48h = +5
       const ageHours = (now - new Date(job.firstSeenAt).getTime()) / (1000 * 60 * 60);
       let freshnessBonus = 0;
-      if (ageHours <= 24) freshnessBonus = 10;
-      else if (ageHours <= 48) freshnessBonus = 5;
+      if (!matchResult.isRoleMismatch) {
+        if (ageHours <= 24) freshnessBonus = 10;
+        else if (ageHours <= 48) freshnessBonus = 5;
+      }
 
-      const finalScore = Math.min(Math.round(score + freshnessBonus), 99);
+      let locationBonus = 0;
+      if (!matchResult.isRoleMismatch && userLocations.length > 0 && userLocations.some((loc) => (job.location || 'Remote').toLowerCase().includes(loc.toLowerCase()))) {
+        locationBonus = 5;
+      }
+
+      const finalScore = matchResult.isRoleMismatch
+        ? matchResult.score
+        : Math.min(Math.round(matchResult.score + freshnessBonus + locationBonus), 99);
 
       return {
         ...job,
         matchScore: finalScore,
         isFresh: ageHours <= 24,
-        whyFit: matchedSkills.length > 0
-          ? `Matches target preferences & skills in ${matchedSkills.slice(0, 3).join(', ')}.`
-          : `High match for your candidate profile & skills.`,
+        whyFit: matchResult.whyFit,
       };
     });
 
@@ -509,6 +507,114 @@ app.post('/api/applications/swipe', authenticateJWT, async (req: AuthenticatedRe
   }
 });
 
+// 8b. OTP Verification Code Submission Handler
+app.post('/api/applications/:id/verify-otp', authenticateJWT, async (req: AuthenticatedRequest, res) => {
+  try {
+    const { id } = req.params;
+    const { code } = req.body;
+
+    if (!code || typeof code !== 'string' || !code.trim()) {
+      return res.status(400).json({ error: 'Security verification code is required.' });
+    }
+
+    const { submitOtpCode, hasPendingOtpSession } = await import('./services/automation/otpResolver');
+
+    if (!hasPendingOtpSession(id as string)) {
+      await prisma.application.update({
+        where: { id: id as string },
+        data: {
+          status: 'failed',
+          errorMessage: 'OTP verification session expired. Please click Retry to submit again.',
+        },
+      });
+      broadcastSSEUpdate({ type: 'application_updated', applicationId: id });
+      return res.status(400).json({
+        error: 'OTP session has expired. Application marked as failed—please click Retry to resubmit.',
+        isExpired: true,
+      });
+    }
+
+    console.log(`[Server] Received OTP verification request for application ${id}`);
+    const result = await submitOtpCode(id as string, code.trim());
+
+    if (result.success && result.isConfirmed) {
+      await prisma.application.update({
+        where: { id: id as string },
+        data: {
+          status: 'submitted',
+          submittedAt: new Date(),
+          screenshotUrl: result.screenshotUrl,
+          errorMessage: null,
+        },
+      });
+
+      broadcastSSEUpdate({ type: 'application_submitted', applicationId: id });
+
+      return res.json({
+        success: true,
+        message: '🎉 Security OTP verified! Application submitted successfully.',
+        result,
+      });
+    } else {
+      return res.status(400).json({
+        error: result.error || 'Failed to verify OTP security code. Please check the code and try again.',
+        result,
+      });
+    }
+  } catch (err: any) {
+    console.error(`[Server] Error verifying OTP:`, err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 8c. Retry Failed Application Handler
+app.post('/api/applications/:id/retry', authenticateJWT, async (req: AuthenticatedRequest, res) => {
+  try {
+    const user = await getOrInitUser(req);
+    const { id } = req.params;
+
+    if (!user.resumeText && !user.resumeJson && !user.resumeFileUrl) {
+      return res.status(400).json({
+        error: 'Master resume required. Please upload your resume in Profile before submitting applications.',
+      });
+    }
+
+    const appRecord = await prisma.application.findFirst({
+      where: { id: id as string, userId: user.id },
+    });
+
+    if (!appRecord) {
+      return res.status(404).json({ error: 'Application record not found.' });
+    }
+
+    const updatedApp = await prisma.application.update({
+      where: { id: appRecord.id },
+      data: {
+        status: 'queued',
+        errorMessage: null,
+      },
+      include: { job: { include: { company: true } } },
+    });
+
+    // Enqueue BullMQ background job for re-attempt
+    await applicationQueue.add('tailor-application', {
+      applicationId: updatedApp.id,
+      autoSubmit: user.autoApplyEnabled !== false,
+    });
+
+    broadcastSSEUpdate({ type: 'application_queued', applicationId: updatedApp.id, jobId: updatedApp.jobId });
+
+    res.json({
+      success: true,
+      application: updatedApp,
+      message: '⚡ Failed application re-queued for background submission.',
+    });
+  } catch (err: any) {
+    console.error(`[Server] Error retrying application ${req.params.id}:`, err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // 9. Paginated Applications List (Tracker - excludes passed/skipped)
 app.get('/api/applications', authenticateJWT, async (req: AuthenticatedRequest, res) => {
   try {
@@ -516,6 +622,8 @@ app.get('/api/applications', authenticateJWT, async (req: AuthenticatedRequest, 
     const page = parseInt(req.query.page as string, 10) || 1;
     const limit = parseInt(req.query.limit as string, 10) || 50;
     const skip = (page - 1) * limit;
+
+    const { hasPendingOtpSession } = await import('./services/automation/otpResolver');
 
     const [apps, total] = await Promise.all([
       prisma.application.findMany({
@@ -527,6 +635,22 @@ app.get('/api/applications', authenticateJWT, async (req: AuthenticatedRequest, 
       }),
       prisma.application.count({ where: { userId: user.id, status: { not: 'passed' } } }),
     ]);
+
+    // Check for expired OTP sessions and mark them as failed
+    for (const app of apps) {
+      if (app.status === 'requires_otp' && !hasPendingOtpSession(app.id)) {
+        console.warn(`[Server] Marking application ${app.id} as failed due to expired OTP session.`);
+        await prisma.application.update({
+          where: { id: app.id },
+          data: {
+            status: 'failed',
+            errorMessage: 'OTP session expired (5 min timeout). Please click Retry to submit again.',
+          },
+        });
+        app.status = 'failed';
+        app.errorMessage = 'OTP session expired (5 min timeout). Please click Retry to submit again.';
+      }
+    }
 
     res.json({
       applications: apps,
@@ -553,22 +677,16 @@ app.get('/api/applications/skipped', authenticateJWT, async (req: AuthenticatedR
 
     const enriched = skippedApps.map((app) => {
       const job = app.job;
-      let score = calculateMatchScore(userResumeText, `${job.title} ${job.description}`);
-      if (userTargetTitles.some((t) => job.title.toLowerCase().includes(t.toLowerCase()))) {
-        score += 15;
-      }
-      const matchedSkills = userSkills.filter((s) =>
-        job.description.toLowerCase().includes(s.toLowerCase())
-      );
-      score += matchedSkills.length * 5;
-      const finalScore = Math.min(Math.round(score), 99);
+      const matchResult = calculateMatchScore(userResumeText, `${job.title} ${job.description}`, {
+        jobTitle: job.title,
+        targetTitles: userTargetTitles,
+        userSkills,
+      });
 
       return {
         ...app,
-        matchScore: app.matchScore || finalScore,
-        whyFit: matchedSkills.length > 0
-          ? `Matches target preferences & skills in ${matchedSkills.slice(0, 3).join(', ')}.`
-          : `Great fit for your technical background.`,
+        matchScore: app.matchScore || matchResult.score,
+        whyFit: matchResult.whyFit,
       };
     });
 

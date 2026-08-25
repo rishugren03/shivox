@@ -11,7 +11,8 @@ export async function submitApplicationToATS(
   dryRun = false,
   jobTitle?: string,
   jobCompany?: string,
-  jobDescription?: string
+  jobDescription?: string,
+  applicationId?: string
 ): Promise<SubmissionResult> {
   const type = atsType.toLowerCase();
   
@@ -26,6 +27,7 @@ export async function submitApplicationToATS(
         jobCompany,
         jobDescription,
         dryRun,
+        applicationId,
       });
     } catch (err: any) {
       console.warn(`[Submitter] Agentic filler warning, trying legacy fallback:`, err.message);

@@ -11,10 +11,51 @@ import { OnboardingWizard } from './components/OnboardingWizard';
 import { UnauthenticatedHero } from './components/UnauthenticatedHero';
 import type { Job, UserProfile, Application } from './types';
 
+type TabType = 'deck' | 'tracker' | 'skipped' | 'profile';
+
+function getTabFromPath(path: string): TabType {
+  const cleanPath = path.trim().replace(/\/+$/, '').toLowerCase();
+  if (cleanPath === '/tracker') return 'tracker';
+  if (cleanPath === '/skipped') return 'skipped';
+  if (cleanPath === '/profile') return 'profile';
+  return 'deck';
+}
+
 const API_BASE = 'http://localhost:5001/api';
 
 export function App() {
-  const [activeTab, setActiveTab] = useState<'deck' | 'tracker' | 'skipped' | 'profile'>('deck');
+  const [activeTab, setActiveTabState] = useState<TabType>(() => {
+    return getTabFromPath(window.location.pathname);
+  });
+
+  const navigateToTab = (tab: TabType, replace = false) => {
+    setActiveTabState(tab);
+    const targetPath = `/${tab}`;
+    if (window.location.pathname !== targetPath) {
+      if (replace) {
+        window.history.replaceState(null, '', targetPath);
+      } else {
+        window.history.pushState(null, '', targetPath);
+      }
+    }
+  };
+
+  useEffect(() => {
+    const currentTab = getTabFromPath(window.location.pathname);
+    const expectedPath = `/${currentTab}`;
+    if (window.location.pathname !== expectedPath) {
+      window.history.replaceState(null, '', expectedPath);
+    }
+
+    const handlePopState = () => {
+      const tab = getTabFromPath(window.location.pathname);
+      setActiveTabState(tab);
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
   const [selectedCategory, setSelectedCategory] = useState<'fulltime' | 'internship'>('fulltime');
   const [jobs, setJobs] = useState<Job[]>([]);
   const [applications, setApplications] = useState<Application[]>([]);
@@ -40,7 +81,7 @@ export function App() {
     };
   };
 
-  const fetchData = async () => {
+  const fetchData = async (showLoading = true) => {
     const token = localStorage.getItem('tsenta_token');
     if (!token) {
       setIsAuthenticated(false);
@@ -48,7 +89,7 @@ export function App() {
     }
 
     try {
-      setLoading(true);
+      if (showLoading) setLoading(true);
       const headers = getHeaders();
       const [deckRes, appRes, skippedRes, profileRes] = await Promise.all([
         axios.get(`${API_BASE}/jobs/deck?category=${selectedCategory}`, { headers }),
@@ -69,7 +110,7 @@ export function App() {
         localStorage.removeItem('tsenta_token');
       }
     } finally {
-      setLoading(false);
+      if (showLoading) setLoading(false);
     }
   };
 
@@ -106,7 +147,14 @@ export function App() {
         { jobId, action },
         { headers: getHeaders() }
       );
-      fetchData();
+      // Background update of tracker and skipped counts without mutating current active jobs deck
+      const headers = getHeaders();
+      const [appRes, skippedRes] = await Promise.all([
+        axios.get(`${API_BASE}/applications`, { headers }),
+        axios.get(`${API_BASE}/applications/skipped`, { headers }),
+      ]);
+      setApplications(appRes.data.applications || []);
+      setSkippedCount(skippedRes.data.skipped?.length || 0);
     } catch (err: any) {
       console.error('Swipe error:', err);
       if (err.response?.data?.error) {
@@ -127,7 +175,7 @@ export function App() {
       await axios.post(`${API_BASE}/applications/${appId}/submit`, {}, { headers: getHeaders() });
       setReviewApp(null);
       fetchData();
-      setActiveTab('tracker');
+      navigateToTab('tracker');
     } catch (err) {
       console.error('Submission error:', err);
     } finally {
@@ -150,7 +198,7 @@ export function App() {
             if (!isAuthenticated && tab !== 'deck') {
               setShowAuthModal(true);
             } else {
-              setActiveTab(tab);
+              navigateToTab(tab);
             }
           }}
           onPoll={handlePollJobs}
@@ -204,7 +252,7 @@ export function App() {
                   apiBase={API_BASE}
                   getHeaders={getHeaders}
                   onRefreshData={fetchData}
-                  onNavigateToDeck={() => setActiveTab('deck')}
+                  onNavigateToDeck={() => navigateToTab('deck')}
                 />
               )}
 

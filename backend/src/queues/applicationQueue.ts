@@ -65,33 +65,22 @@ export const applicationWorker = new Worker<ApplicationJobData>(
       ? JSON.parse(user.resumeJson)
       : {};
 
-    // 3. Compute real embedding match score if available, or fallback similarity
+    // 3. Compute role-aware match score
     let matchScore = 80;
     try {
-      let userEmbedding: number[] = [];
-      if (activeResumeVersion?.embedding) {
-        userEmbedding = JSON.parse(activeResumeVersion.embedding);
-      } else if (user.embedding) {
-        userEmbedding = JSON.parse(user.embedding);
-      } else if (userResumeText) {
-        userEmbedding = await generateOpenAIEmbedding(userResumeText);
-      }
+      const userTargetTitles: string[] = user.targetJobTitles ? JSON.parse(user.targetJobTitles) : [];
+      const userSkills: string[] = user.preferredSkills ? JSON.parse(user.preferredSkills) : [];
+      
+      const matchResult = calculateMatchScore(userResumeText, `${jobPosting.title} ${jobPosting.description}`, {
+        jobTitle: jobPosting.title,
+        targetTitles: userTargetTitles,
+        userSkills,
+      });
 
-      let jobEmbedding: number[] = [];
-      if (jobPosting.embedding) {
-        jobEmbedding = JSON.parse(jobPosting.embedding);
-      } else {
-        jobEmbedding = await generateOpenAIEmbedding(`${jobPosting.title} ${jobPosting.description}`);
-      }
-
-      if (userEmbedding.length > 0 && jobEmbedding.length > 0) {
-        const sim = computeCosineSimilarity(userEmbedding, jobEmbedding);
-        matchScore = Math.min(Math.max(Math.round(sim * 100), 50), 99);
-      } else {
-        matchScore = calculateMatchScore(userResumeText, `${jobPosting.title} ${jobPosting.description}`);
-      }
+      matchScore = matchResult.score;
     } catch (e) {
-      matchScore = calculateMatchScore(userResumeText, `${jobPosting.title} ${jobPosting.description}`);
+      console.warn('[BullMQ Worker] Error calculating match score, using fallback 80:', e);
+      matchScore = 80;
     }
 
     // 4. Generate match reason and tailored bullets preserving candidate's authentic experience
@@ -193,10 +182,14 @@ export const applicationWorker = new Worker<ApplicationJobData>(
         jobPosting.atsType,
         jobPosting.url,
         applicantInfo,
-        false
+        false,
+        jobPosting.title,
+        jobPosting.company?.name,
+        jobPosting.description,
+        applicationId
       );
 
-      if (submission.success) {
+      if (submission.success && submission.isConfirmed) {
         await prisma.application.update({
           where: { id: applicationId },
           data: {
@@ -205,15 +198,43 @@ export const applicationWorker = new Worker<ApplicationJobData>(
             screenshotUrl: submission.screenshotUrl,
           },
         });
+      } else if (submission.requiresOtp) {
+        console.log(`[BullMQ Worker] 🔑 Application ${applicationId} requires OTP verification for ${submission.otpEmail}`);
+        await prisma.application.update({
+          where: { id: applicationId },
+          data: {
+            status: 'requires_otp',
+            screenshotUrl: submission.screenshotUrl,
+            errorMessage: `A security verification code was sent to ${submission.otpEmail || 'your email'}. Enter the 8-character code to complete submission.`,
+          },
+        });
+        
+        try {
+          const { broadcastSSEUpdate } = await import('../server');
+          broadcastSSEUpdate({ type: 'application_updated', applicationId });
+        } catch (e) {
+          // Ignore SSE import if running standalone
+        }
+
+        return { applicationId, status: 'requires_otp', otpEmail: submission.otpEmail };
       } else {
+        const failureDetails =
+          submission.error ||
+          (submission.validationMessages && submission.validationMessages.length > 0
+            ? `Form validation error: ${submission.validationMessages.join('; ')}`
+            : submission.failureReason === 'SPAM_FLAGGED'
+            ? 'Submission flagged as possible spam by ATS anti-bot check.'
+            : 'Application submission could not be verified as completed.');
+
         await prisma.application.update({
           where: { id: applicationId },
           data: {
             status: 'failed',
-            errorMessage: submission.error,
+            errorMessage: failureDetails,
+            screenshotUrl: submission.screenshotUrl,
           },
         });
-        throw new Error(`ATS submission failed: ${submission.error}`);
+        throw new Error(`ATS submission failed: ${failureDetails}`);
       }
     }
 

@@ -11,10 +11,11 @@ import {
   Kanban,
   List as ListIcon,
   Send,
-  MessageSquare,
-  Award,
   FileText,
   ExternalLink,
+  Key,
+  Loader2,
+  RotateCcw,
 } from 'lucide-react';
 
 interface TrackerProps {
@@ -31,7 +32,12 @@ export const Tracker: React.FC<TrackerProps> = ({
   const [viewMode, setViewMode] = useState<'kanban' | 'list'>('kanban');
   const [selectedApp, setSelectedApp] = useState<Application | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState<'all' | 'queued' | 'tailoring' | 'submitted' | 'failed'>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'requires_otp' | 'queued' | 'tailoring' | 'submitted' | 'failed'>('all');
+  const [otpCodes, setOtpCodes] = useState<Record<string, string>>({});
+  const [otpLoading, setOtpLoading] = useState<Record<string, boolean>>({});
+  const [otpError, setOtpError] = useState<Record<string, string>>({});
+  const [retryingApps, setRetryingApps] = useState<Record<string, boolean>>({});
+  const [retryError, setRetryError] = useState<Record<string, string>>({});
 
   // SSE Listener for Real-Time Application Updates
   useEffect(() => {
@@ -85,6 +91,7 @@ export const Tracker: React.FC<TrackerProps> = ({
 
       if (!matchesSearch) return false;
 
+      if (statusFilter === 'requires_otp') return app.status === 'requires_otp';
       if (statusFilter === 'submitted') return app.status === 'submitted';
       if (statusFilter === 'queued') return app.status === 'queued';
       if (statusFilter === 'tailoring') return app.status === 'tailoring' || app.status === 'pending_review' || app.status === 'approved';
@@ -95,8 +102,96 @@ export const Tracker: React.FC<TrackerProps> = ({
 
   const activeDesktopApp = selectedApp || (filteredApps.length > 0 ? filteredApps[0] : null);
 
+  const handleVerifyOtp = async (appId: string) => {
+    const code = otpCodes[appId];
+    if (!code || !code.trim()) {
+      setOtpError((prev) => ({ ...prev, [appId]: 'Please enter the verification code.' }));
+      return;
+    }
+
+    setOtpLoading((prev) => ({ ...prev, [appId]: true }));
+    setOtpError((prev) => ({ ...prev, [appId]: '' }));
+
+    try {
+      const token = localStorage.getItem('tsenta_token') || localStorage.getItem('token');
+      const userId = localStorage.getItem('tsenta_user_id') || '';
+      const userEmail = localStorage.getItem('tsenta_user_email') || '';
+
+      const res = await fetch(`${apiBase}/applications/${appId}/verify-otp`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          ...(userId ? { 'x-user-id': userId } : {}),
+          ...(userEmail ? { 'x-user-email': userEmail } : {}),
+        },
+        body: JSON.stringify({ code: code.trim() }),
+      });
+
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setOtpCodes((prev) => ({ ...prev, [appId]: '' }));
+        onRefresh();
+      } else {
+        setOtpError((prev) => ({ ...prev, [appId]: data.error || 'Failed to verify OTP code.' }));
+      }
+    } catch (err: any) {
+      setOtpError((prev) => ({ ...prev, [appId]: err.message || 'Network error verifying OTP code.' }));
+    } finally {
+      setOtpLoading((prev) => ({ ...prev, [appId]: false }));
+    }
+  };
+
+  const handleRetryApplication = async (appId: string, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+
+    setRetryingApps((prev) => ({ ...prev, [appId]: true }));
+    setRetryError((prev) => ({ ...prev, [appId]: '' }));
+
+    try {
+      const token = localStorage.getItem('tsenta_token') || localStorage.getItem('token');
+      const userId = localStorage.getItem('tsenta_user_id') || '';
+      const userEmail = localStorage.getItem('tsenta_user_email') || '';
+
+      const res = await fetch(`${apiBase}/applications/${appId}/retry`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          ...(userId ? { 'x-user-id': userId } : {}),
+          ...(userEmail ? { 'x-user-email': userEmail } : {}),
+        },
+      });
+
+      const data = await res.json();
+      if (res.ok && data.success) {
+        if (selectedApp?.id === appId) {
+          setSelectedApp(null);
+        }
+        onRefresh();
+      } else {
+        setRetryError((prev) => ({ ...prev, [appId]: data.error || 'Failed to retry application.' }));
+      }
+    } catch (err: any) {
+      setRetryError((prev) => ({ ...prev, [appId]: err.message || 'Network error retrying application.' }));
+    } finally {
+      setRetryingApps((prev) => ({ ...prev, [appId]: false }));
+    }
+  };
+
+  const otpRequiredApps = useMemo(() => {
+    return activeApplications.filter((a) => a.status === 'requires_otp');
+  }, [activeApplications]);
+
   const statusBadge = (status: string) => {
     switch (status) {
+      case 'requires_otp':
+        return (
+          <span className="px-2.5 py-1 rounded-full bg-amber-500 text-white text-[11px] font-extrabold flex items-center gap-1 shadow-xs animate-pulse">
+            <Key className="w-3 h-3 text-white" />
+            ACTION NEEDED (OTP)
+          </span>
+        );
       case 'submitted':
         return (
           <span className="px-2.5 py-1 rounded-full bg-neutral-900 text-white text-[11px] font-extrabold flex items-center gap-1">
@@ -139,8 +234,7 @@ export const Tracker: React.FC<TrackerProps> = ({
     { key: 'queued', title: 'Queued', color: 'border-blue-500', icon: Clock },
     { key: 'tailoring', title: 'AI Tailoring', color: 'border-purple-500', icon: Sparkles },
     { key: 'submitted', title: 'Submitted', color: 'border-emerald-500', icon: Send },
-    { key: 'replied', title: 'Replied', color: 'border-amber-500', icon: MessageSquare },
-    { key: 'interview', title: 'Interviewing', color: 'border-indigo-500', icon: Award },
+    { key: 'requires_otp', title: 'Action Needed (OTP)', color: 'border-amber-500', icon: Key },
     { key: 'failed', title: 'Failed / Error', color: 'border-red-500', icon: AlertTriangle },
   ];
 
@@ -159,7 +253,7 @@ export const Tracker: React.FC<TrackerProps> = ({
   }
 
   return (
-    <div className="w-full max-w-7xl mx-auto px-1 sm:px-4 space-y-4">
+    <div className="w-full max-w-[1600px] mx-auto px-2 sm:px-6 space-y-5">
       {/* Analytics Bar */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3.5 bg-white rounded-3xl p-4 sm:p-5 border border-neutral-200 shadow-sm">
         <div className="p-4 bg-neutral-50 rounded-2xl border border-neutral-100 flex flex-col justify-between">
@@ -205,6 +299,110 @@ export const Tracker: React.FC<TrackerProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Interactive OTP Verification Alert Banner */}
+      {otpRequiredApps.length > 0 && (
+        <div className="bg-gradient-to-r from-amber-500/15 via-amber-500/10 to-amber-500/15 border-2 border-amber-500/40 rounded-3xl p-5 shadow-lg space-y-4">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-2xl bg-amber-500 text-white flex items-center justify-center font-bold shadow-md animate-pulse shrink-0">
+                <Key className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-black text-amber-950 flex items-center gap-2">
+                  🔐 Action Required: Security OTP Code Needed
+                </h3>
+                <p className="text-xs font-semibold text-amber-800">
+                  Greenhouse / ATS sent a verification code to confirm candidate humanity before completing submission.
+                </p>
+              </div>
+            </div>
+            <span className="px-3 py-1 rounded-full bg-amber-500 text-white text-xs font-black shrink-0">
+              {otpRequiredApps.length} Pending Code{otpRequiredApps.length > 1 ? 's' : ''}
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
+            {otpRequiredApps.map((app) => (
+              <div
+                key={app.id}
+                className="bg-white rounded-2xl p-4 border border-amber-300/80 shadow-xs space-y-3"
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <span className="text-[11px] font-bold text-amber-700 uppercase tracking-wider block">
+                      {app.job?.company?.name}
+                    </span>
+                    <h4 className="text-sm font-black text-neutral-900 leading-snug">
+                      {app.job?.title}
+                    </h4>
+                  </div>
+                  {statusBadge(app.status)}
+                </div>
+
+                <p className="text-[11px] font-medium text-neutral-600 bg-amber-50 p-2.5 rounded-xl border border-amber-100">
+                  {app.errorMessage || 'Please check your email inbox and enter the 8-character code below.'}
+                </p>
+
+                {otpError[app.id] && (
+                  <div className="flex items-center justify-between gap-2 text-[11px] font-bold text-red-600 bg-red-50 p-2.5 rounded-xl border border-red-200">
+                    <span className="truncate">⚠️ {otpError[app.id]}</span>
+                    <button
+                      onClick={(e) => handleRetryApplication(app.id, e)}
+                      disabled={retryingApps[app.id]}
+                      className="px-2.5 py-1 bg-red-600 hover:bg-red-500 disabled:bg-red-300 text-white rounded-lg text-[10px] font-black shadow-xs transition-all flex items-center gap-1 shrink-0"
+                    >
+                      {retryingApps[app.id] ? (
+                        <>
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                          Retrying...
+                        </>
+                      ) : (
+                        <>
+                          <RotateCcw className="w-3 h-3" />
+                          Retry App
+                        </>
+                      )}
+                    </button>
+                  </div>
+                )}
+
+                <div className="flex items-center gap-2 pt-1">
+                  <input
+                    type="text"
+                    placeholder="Enter 8-character OTP code..."
+                    value={otpCodes[app.id] || ''}
+                    onChange={(e) =>
+                      setOtpCodes((prev) => ({ ...prev, [app.id]: e.target.value }))
+                    }
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') handleVerifyOtp(app.id);
+                    }}
+                    className="flex-1 px-3.5 py-2 rounded-xl bg-neutral-50 border border-amber-300 text-xs font-mono font-bold text-neutral-900 tracking-wider placeholder:text-neutral-400 focus:outline-none focus:border-amber-600 focus:bg-white"
+                  />
+                  <button
+                    onClick={() => handleVerifyOtp(app.id)}
+                    disabled={otpLoading[app.id]}
+                    className="px-4 py-2 bg-amber-600 hover:bg-amber-500 disabled:bg-amber-300 text-white rounded-xl text-xs font-black shadow-md shadow-amber-600/20 transition-all flex items-center gap-1.5 shrink-0"
+                  >
+                    {otpLoading[app.id] ? (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        Verifying...
+                      </>
+                    ) : (
+                      <>
+                        <Send className="w-3.5 h-3.5" />
+                        Submit Code
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Control Bar: View Switcher (Kanban vs List) & Search */}
       <div className="flex flex-col sm:flex-row items-center justify-between gap-3 bg-white p-3.5 rounded-2xl border border-neutral-200 shadow-sm">
@@ -268,7 +466,7 @@ export const Tracker: React.FC<TrackerProps> = ({
 
       {/* KANBAN BOARD VIEW (Gap 4) */}
       {viewMode === 'kanban' ? (
-        <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-6 gap-3 overflow-x-auto pb-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 w-full pb-4">
           {kanbanStages.map((stage) => {
             const StageIcon = stage.icon;
             const stageApps = filteredApps.filter((a) => {
@@ -327,6 +525,25 @@ export const Tracker: React.FC<TrackerProps> = ({
                           View Submitted Resume
                         </a>
                       )}
+                      {app.status === 'failed' && (
+                        <button
+                          onClick={(e) => handleRetryApplication(app.id, e)}
+                          disabled={retryingApps[app.id]}
+                          className="mt-1.5 inline-flex items-center gap-1.5 text-[10px] font-black text-white bg-red-600 hover:bg-red-500 disabled:bg-red-300 px-2.5 py-1.5 rounded-lg shadow-sm transition-all w-full justify-center"
+                        >
+                          {retryingApps[app.id] ? (
+                            <>
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                              Retrying...
+                            </>
+                          ) : (
+                            <>
+                              <RotateCcw className="w-3 h-3" />
+                              Retry Application
+                            </>
+                          )}
+                        </button>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -362,6 +579,38 @@ export const Tracker: React.FC<TrackerProps> = ({
                     </div>
                     <div className="shrink-0">{statusBadge(app.status)}</div>
                   </div>
+
+                  {app.status === 'failed' && (
+                    <div className="space-y-1.5 pt-2 border-t border-neutral-100">
+                      {retryError[app.id] && (
+                        <p className="text-[11px] font-bold text-red-600 bg-red-50 p-1.5 rounded-md border border-red-200">
+                          ⚠️ {retryError[app.id]}
+                        </p>
+                      )}
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-semibold text-red-600 truncate max-w-[200px]">
+                          {app.errorMessage || 'Submission failed'}
+                        </span>
+                        <button
+                          onClick={(e) => handleRetryApplication(app.id, e)}
+                          disabled={retryingApps[app.id]}
+                          className="px-3 py-1.5 bg-red-600 hover:bg-red-500 disabled:bg-red-300 text-white rounded-xl text-xs font-black shadow-xs transition-all flex items-center gap-1.5 shrink-0"
+                        >
+                          {retryingApps[app.id] ? (
+                            <>
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              Retrying...
+                            </>
+                          ) : (
+                            <>
+                              <RotateCcw className="w-3.5 h-3.5" />
+                              Retry
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -377,6 +626,32 @@ export const Tracker: React.FC<TrackerProps> = ({
                   </div>
                   <div>{statusBadge(activeDesktopApp.status)}</div>
                 </div>
+
+                {activeDesktopApp.status === 'failed' && (
+                  <div className="bg-red-50 p-4 rounded-2xl border border-red-200 flex items-center justify-between">
+                    <div className="space-y-1">
+                      <span className="text-xs font-bold text-red-700 block">Application Failed</span>
+                      <p className="text-xs text-red-600">{activeDesktopApp.errorMessage || 'Validation or submission error occurred.'}</p>
+                    </div>
+                    <button
+                      onClick={(e) => handleRetryApplication(activeDesktopApp.id, e)}
+                      disabled={retryingApps[activeDesktopApp.id]}
+                      className="px-4 py-2 bg-red-600 hover:bg-red-500 disabled:bg-red-300 text-white rounded-xl text-xs font-black shadow-md transition-all flex items-center gap-1.5 shrink-0"
+                    >
+                      {retryingApps[activeDesktopApp.id] ? (
+                        <>
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          Retrying...
+                        </>
+                      ) : (
+                        <>
+                          <RotateCcw className="w-3.5 h-3.5" />
+                          Retry Submission
+                        </>
+                      )}
+                    </button>
+                  </div>
+                )}
 
                 {activeDesktopApp.submittedResumeUrl && (
                   <div className="bg-red-50/60 p-4 rounded-2xl border border-red-200 flex items-center justify-between shadow-xs">
@@ -430,6 +705,32 @@ export const Tracker: React.FC<TrackerProps> = ({
               {statusBadge(selectedApp.status)}
             </div>
             <h2 className="text-xl font-black text-neutral-900">{selectedApp.job?.title}</h2>
+
+            {selectedApp.status === 'failed' && (
+              <div className="bg-red-50 p-4 rounded-2xl border border-red-200 flex items-center justify-between">
+                <div className="space-y-1">
+                  <span className="text-xs font-bold text-red-700 block">Application Failed</span>
+                  <p className="text-xs text-red-600">{selectedApp.errorMessage || 'Validation or submission error occurred.'}</p>
+                </div>
+                <button
+                  onClick={(e) => handleRetryApplication(selectedApp.id, e)}
+                  disabled={retryingApps[selectedApp.id]}
+                  className="px-4 py-2 bg-red-600 hover:bg-red-500 disabled:bg-red-300 text-white rounded-xl text-xs font-black shadow-md transition-all flex items-center gap-1.5 shrink-0"
+                >
+                  {retryingApps[selectedApp.id] ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      Retrying...
+                    </>
+                  ) : (
+                    <>
+                      <RotateCcw className="w-3.5 h-3.5" />
+                      Retry Application
+                    </>
+                  )}
+                </button>
+              </div>
+            )}
 
             {selectedApp.submittedResumeUrl && (
               <div className="bg-red-50/60 p-4 rounded-2xl border border-red-200 flex items-center justify-between">

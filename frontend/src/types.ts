@@ -72,7 +72,7 @@ export interface Application {
   userId: string;
   jobId: string;
   job: Job;
-  status: 'queued' | 'tailoring' | 'pending_review' | 'approved' | 'submitted' | 'replied' | 'interview' | 'failed' | 'passed';
+  status: 'queued' | 'tailoring' | 'pending_review' | 'approved' | 'requires_otp' | 'submitted' | 'replied' | 'interview' | 'failed' | 'passed';
   matchScore?: number;
   matchReason?: string;
   whyFit?: string;

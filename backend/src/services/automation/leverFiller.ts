@@ -1,6 +1,7 @@
 import { chromium } from 'playwright-extra';
 import stealthPlugin from 'puppeteer-extra-plugin-stealth';
 import { ApplicantInfo, SubmissionResult } from './types';
+import { verifySubmissionOutcome } from './verifySubmission';
 import path from 'path';
 import fs from 'fs';
 
@@ -137,17 +138,28 @@ export async function fillLeverApplication(
     await page.waitForTimeout(1000);
     await page.screenshot({ path: screenshotPath, fullPage: true });
 
+    // Verify submission outcome on page post-submit
+    const verification = dryRun
+      ? { success: true, isConfirmed: true, validationMessages: [] }
+      : await verifySubmissionOutcome(page, applyUrl);
+
     await browser.close();
     return {
-      success: true,
+      success: verification.success,
+      isConfirmed: verification.isConfirmed,
+      failureReason: verification.failureReason,
+      validationMessages: verification.validationMessages,
+      error: verification.errorDetails,
       screenshotUrl: `/uploads/screenshots/${screenshotFileName}`,
-      submittedAt: new Date(),
+      submittedAt: verification.success ? new Date() : undefined,
     };
   } catch (err: any) {
     console.error('[LeverFiller] Error during application:', err.message);
     await browser.close();
     return {
       success: false,
+      isConfirmed: false,
+      failureReason: 'UNKNOWN',
       error: err.message,
     };
   }

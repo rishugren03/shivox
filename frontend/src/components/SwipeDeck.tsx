@@ -36,14 +36,13 @@ export const SwipeDeck: React.FC<SwipeDeckProps> = ({
   const [expandedJob, setExpandedJob] = useState<Job | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
-  // Reset index when category or jobs count changes
+  // Reset index ONLY when selected category changes
   useEffect(() => {
     setCurrentIndex(0);
-  }, [selectedCategory, jobs.length]);
+  }, [selectedCategory]);
 
   // Ensure index is within valid bounds
-  const validIndex = currentIndex >= jobs.length ? 0 : currentIndex;
-  const currentJob = jobs[validIndex];
+  const currentJob = jobs[currentIndex];
 
   const x = useMotionValue(0);
   const rotate = useTransform(x, [-200, 200], [-18, 18]);
