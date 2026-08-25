@@ -9,6 +9,8 @@ import { extractFormFields } from '../ai/agents/formInspectorAgent';
 import { resolveFormQuestions } from '../ai/agents/questionResolverAgent';
 import { verifySubmissionOutcome } from './verifySubmission';
 import { registerPendingOtpSession } from './otpResolver';
+import { validateDomBeforeSubmit, visionVerifyForm } from './preSubmitGate';
+import { prisma } from '../../config/prisma';
 import {
   applyAdvancedStealthOverrides,
   humanType,
@@ -26,6 +28,8 @@ export interface AgenticFillOptions {
   jobDescription?: string;
   dryRun?: boolean;
   applicationId?: string;
+  masterResumeJson?: any;
+  masterResumeText?: string;
 }
 
 async function navigateToApplicationForm(page: any, jobTitle: string) {
@@ -34,13 +38,53 @@ async function navigateToApplicationForm(page: any, jobTitle: string) {
 
   console.log(`[AgenticFiller] Form inputs not found on landing page. Searching for direct job application link for "${jobTitle}"...`);
 
+  const currentUrl = page.url();
+
+  // Greenhouse-specific: check for embedded application iframe (#grnhse_app)
+  if (/greenhouse/i.test(currentUrl)) {
+    const ghIframe = page.frameLocator('#grnhse_app').first();
+    try {
+      const iframeInputs = await ghIframe.locator('input:not([type="hidden"]), textarea').count().catch(() => 0);
+      if (iframeInputs >= 3) {
+        console.log(`[AgenticFiller] Found Greenhouse embedded application iframe with ${iframeInputs} inputs.`);
+        return; // Form is inside iframe — caller should handle frameLocator
+      }
+    } catch (e) {}
+
+    // Try scrolling to #application anchor or clicking "Apply for this job"
+    const applyLink = page.locator('a[href="#app"], a[href*="#application"], a:has-text("Apply for this job"), button:has-text("Apply for this job")').first();
+    if (await applyLink.isVisible().catch(() => false)) {
+      console.log(`[AgenticFiller] Clicking Greenhouse Apply link...`);
+      await applyLink.click({ force: true }).catch(() => {});
+      await page.waitForTimeout(3000);
+      const newInputs = await page.locator('input:not([type="hidden"]), textarea').count().catch(() => 0);
+      if (newInputs >= 3) return;
+    }
+  }
+
+  // Lever-specific: navigate to /apply if not already there
+  if (/lever\.co/i.test(currentUrl) && !/\/apply/i.test(currentUrl)) {
+    const leverApplyUrl = currentUrl.replace(/\/?$/, '/apply');
+    console.log(`[AgenticFiller] Lever detected. Navigating to apply URL: ${leverApplyUrl}`);
+    await page.goto(leverApplyUrl, { waitUntil: 'networkidle', timeout: 15000 }).catch(async () => {
+      await page.goto(leverApplyUrl, { waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {});
+    });
+    await page.waitForTimeout(2000);
+    const leverInputs = await page.locator('input:not([type="hidden"]), textarea').count().catch(() => 0);
+    if (leverInputs >= 3) return;
+  }
+
   const selectors = [
     `a:has-text("${jobTitle}")`,
     `button:has-text("${jobTitle}")`,
-    'a:has-text("Apply")',
-    'button:has-text("Apply")',
+    'a:has-text("Apply for this position")',
+    'button:has-text("Apply for this position")',
     'a:has-text("Apply for this Job")',
     'button:has-text("Apply for this Job")',
+    'a:has-text("Apply")',
+    'button:has-text("Apply")',
+    'a:has-text("Apply Now")',
+    'button:has-text("Apply Now")',
     'a[href*="job"]',
     'a[href*="apply"]',
   ];
@@ -133,9 +177,15 @@ async function handleLocationCombobox(page: any, locationQuery: string): Promise
   return false;
 }
 
-async function executePreSubmitSelfCorrection(page: any, applicant: ApplicantInfo) {
+async function executePreSubmitSelfCorrection(
+  page: any,
+  applicant: ApplicantInfo
+): Promise<{ fixedCount: number; unresolvedFields: string[] }> {
   console.log('[SelfCorrectionQA] Running pre-submit DOM self-correction loop...');
   await page.waitForTimeout(1500);
+
+  let fixedCount = 0;
+  const unresolvedFields: string[] = [];
 
   // 1. Find all visible text/email/url/tel inputs & textareas on the page
   const allInputs = page.locator('input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="checkbox"]):not([type="radio"]):not([type="file"]), textarea');
@@ -173,6 +223,7 @@ async function executePreSubmitSelfCorrection(page: any, applicant: ApplicantInf
       }
     }
     const cleanLabel = labelText.replace(/\s+/g, ' ').trim();
+    const isRequired = cleanLabel.includes('*') || /required/i.test(cleanLabel) || isReqAttr;
 
     let fillText = '';
     if (/github/i.test(cleanLabel)) {
@@ -193,19 +244,49 @@ async function executePreSubmitSelfCorrection(page: any, applicant: ApplicantInf
     } else if (/website|portfolio/i.test(cleanLabel)) {
       fillText = applicant.portfolioUrl || 'https://github.com/rishugren03';
       console.log(`[SelfCorrectionQA] Filled Portfolio (${cleanLabel.slice(0, 30)}...)`);
-    } else if (/if other|please specify|how did you hear/i.test(cleanLabel)) {
+    } else if (/city|state|location|address|country|residing/i.test(cleanLabel)) {
+      fillText = applicant.location || 'San Francisco, CA';
+      console.log(`[SelfCorrectionQA] Filled Location (${cleanLabel.slice(0, 30)}...)`);
+    } else if (/if other|please specify|how did you hear/i.test(cleanLabel) && tagName !== 'select') {
       fillText = 'Job Board / LinkedIn';
       console.log(`[SelfCorrectionQA] Filled conditional text field (${cleanLabel.slice(0, 30)}...): "Job Board / LinkedIn"`);
-    } else if (cleanLabel.includes('*') || /required/i.test(cleanLabel) || isReqAttr || tagName === 'textarea') {
-      if (/city|state|location|address|country|residing/i.test(cleanLabel)) {
-        fillText = applicant.location || 'San Francisco, CA';
-      } else {
-        fillText = applicant.coverNote || 'I am eager to bring my expertise in software development and AI engineering to this role.';
-      }
-      console.log(`[SelfCorrectionQA] Filled empty required field (${cleanLabel.slice(0, 30)}...)`);
+    } else if ((/why|motivation|tell us|cover letter|additional info|note|about you|interest/i.test(cleanLabel) || tagName === 'textarea') && tagName !== 'select') {
+      fillText = applicant.coverNote || 'I am eager to bring my expertise in software development and AI engineering to this role.';
+      console.log(`[SelfCorrectionQA] Filled open-ended prompt field (${cleanLabel.slice(0, 30)}...) with coverNote`);
+    } else if (tagName === 'select') {
+      // Auto-select first non-empty option for select element or custom dropdown
+      try {
+        if (tagName === 'select') {
+          const options = await input.locator('option').allInnerTexts().catch(() => []);
+          const validOpt = options.find((o: string) => o.trim() && !/select|choose|please/i.test(o.trim())) || options[1] || options[0];
+          if (validOpt) {
+            await input.selectOption({ label: validOpt.trim() }).catch(() => {});
+            console.log(`[SelfCorrectionQA] Auto-selected option for <select> (${cleanLabel.slice(0, 30)}...): "${validOpt.trim()}"`);
+            fixedCount++;
+          }
+        } else {
+          // Custom select container handling
+          const parent = input.locator('..').first();
+          const childSelect = parent.locator('select').first();
+          if (await childSelect.isVisible().catch(() => false)) {
+            const options = await childSelect.locator('option').allInnerTexts().catch(() => []);
+            const validOpt = options.find((o: string) => o.trim() && !/select|choose|please/i.test(o.trim())) || options[1] || options[0];
+            if (validOpt) {
+              await childSelect.selectOption({ label: validOpt.trim() }).catch(() => {});
+              console.log(`[SelfCorrectionQA] Auto-selected option for container <select> (${cleanLabel.slice(0, 30)}...): "${validOpt.trim()}"`);
+              fixedCount++;
+            }
+          }
+        }
+      } catch (e: any) {}
+    } else if (isRequired) {
+      // General fallback for unmatched required text fields
+      fillText = 'Yes';
+      console.log(`[SelfCorrectionQA] Filled generic required field (${cleanLabel.slice(0, 30)}...): "Yes"`);
+      fixedCount++;
     }
 
-    if (fillText) {
+    if (fillText && tagName !== 'select') {
       await input.click({ force: true }).catch(() => {});
       await input.fill('').catch(() => {});
       await input.pressSequentially(fillText, { delay: 10 }).catch(async () => {
@@ -216,6 +297,7 @@ async function executePreSubmitSelfCorrection(page: any, applicant: ApplicantInf
         el.dispatchEvent(new Event('change', { bubbles: true }));
         el.dispatchEvent(new Event('blur', { bubbles: true }));
       }).catch(() => {});
+      fixedCount++;
     }
   }
 
@@ -250,15 +332,18 @@ async function executePreSubmitSelfCorrection(page: any, applicant: ApplicantInf
       }
     } catch (e: any) {}
   }
+
+  return { fixedCount, unresolvedFields };
 }
 
 export async function handlePostSubmitValidationErrors(
   page: any,
   validationMessages: string[],
   applicant: ApplicantInfo
-): Promise<number> {
+): Promise<{ fixedCount: number; unresolvedFields: string[] }> {
   console.log('[PostSubmitSelfCorrection] Inspecting validation messages to auto-fix missing fields on DOM...');
   let fixedCount = 0;
+  const unresolvedFields: string[] = [];
 
   // Extract key field targets from validation messages
   const targetHints: string[] = [];
@@ -267,7 +352,6 @@ export async function handlePostSubmitValidationErrors(
     if (match && match[1]) {
       targetHints.push(match[1].trim());
     } else if (msg.length > 5 && msg.length < 120) {
-      // Clean leading error prefix if present
       const cleanMsg = msg.replace(/^your form needs corrections|^we couldn't submit your application/i, '').trim();
       if (cleanMsg) targetHints.push(cleanMsg);
     }
@@ -303,7 +387,6 @@ export async function handlePostSubmitValidationErrors(
     }
     const cleanLabel = labelText.replace(/\s+/g, ' ').trim();
 
-    // Determine if input matches any target hint or is visibly invalid/empty
     const matchesHint = targetHints.some(hint => {
       const cleanHint = hint.replace(/^(missing entry for required field:|\*|\s)+/i, '').trim().toLowerCase();
       if (!cleanHint) return false;
@@ -314,7 +397,7 @@ export async function handlePostSubmitValidationErrors(
     const needsCorrection = (!val || val.trim() === '' || isInvalidAttr) && (matchesHint || isRequiredAttr || isInvalidAttr || tagName === 'textarea');
 
     if (needsCorrection) {
-      let contentToFill = applicant.coverNote || 'I am deeply interested in this role and excited to bring my technical experience to your engineering team.';
+      let contentToFill = '';
 
       if (/github/i.test(cleanLabel)) contentToFill = applicant.githubUrl || 'https://github.com/rishugren03';
       else if (/linkedin/i.test(cleanLabel)) contentToFill = applicant.linkedinUrl || 'https://linkedin.com/in/rishu-kumar';
@@ -322,27 +405,36 @@ export async function handlePostSubmitValidationErrors(
       else if (/email/i.test(cleanLabel)) contentToFill = applicant.email;
       else if (/^name\*?$|full name|preferred name/i.test(cleanLabel)) contentToFill = applicant.fullName;
       else if (/city|location|address|country/i.test(cleanLabel)) contentToFill = applicant.location || 'San Francisco, CA';
+      else if (/if other|please specify|how did you hear/i.test(cleanLabel)) contentToFill = 'Job Board / LinkedIn';
+      else if (/why|motivation|tell us|cover letter|additional info|note|about you|interest/i.test(cleanLabel) || tagName === 'textarea') {
+        contentToFill = applicant.coverNote || 'I am deeply interested in this role and excited to bring my technical experience to your engineering team.';
+      } else {
+        console.warn(`[PostSubmitSelfCorrection] ⚠️ Field "${cleanLabel.slice(0, 40)}" needs correction but is not an open-ended ask or known pattern. Marking skipped.`);
+        unresolvedFields.push(cleanLabel || 'Unlabeled field');
+      }
 
-      await input.scrollIntoViewIfNeeded().catch(() => {});
-      await input.click({ force: true }).catch(() => {});
-      await input.focus().catch(() => {});
-      await input.fill('').catch(() => {});
-      await input.pressSequentially(contentToFill, { delay: 10 }).catch(async () => {
-        await input.fill(contentToFill).catch(() => {});
-      });
+      if (contentToFill) {
+        await input.scrollIntoViewIfNeeded().catch(() => {});
+        await input.click({ force: true }).catch(() => {});
+        await input.focus().catch(() => {});
+        await input.fill('').catch(() => {});
+        await input.pressSequentially(contentToFill, { delay: 10 }).catch(async () => {
+          await input.fill(contentToFill).catch(() => {});
+        });
 
-      await input.evaluate((el: HTMLInputElement | HTMLTextAreaElement) => {
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-        el.dispatchEvent(new Event('blur', { bubbles: true }));
-      }).catch(() => {});
+        await input.evaluate((el: HTMLInputElement | HTMLTextAreaElement) => {
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          el.dispatchEvent(new Event('blur', { bubbles: true }));
+        }).catch(() => {});
 
-      console.log(`[PostSubmitSelfCorrection] ✅ Fixed missing/invalid field (${cleanLabel.slice(0, 40)}...) -> filled "${contentToFill.slice(0, 35)}..."`);
-      fixedCount++;
+        console.log(`[PostSubmitSelfCorrection] ✅ Fixed missing/invalid field (${cleanLabel.slice(0, 40)}...) -> filled "${contentToFill.slice(0, 35)}..."`);
+        fixedCount++;
+      }
     }
   }
 
-  return fixedCount;
+  return { fixedCount, unresolvedFields };
 }
 
 
@@ -354,7 +446,56 @@ export async function fillApplicationAgentically(options: AgenticFillOptions): P
 
   console.log(`[AgenticFiller] Starting multi-agent workflow for ${jobCompany} (${jobTitle}) at ${url}`);
 
-  // Step 1: Resume Tailor Agent -> Generate customized ATS PDF Resume
+  // FIX 1: Resolve authenticated user's masterResumeJson from options or Prisma DB
+  let masterResumeJson = options.masterResumeJson;
+  let masterResumeText = options.masterResumeText;
+
+  if (!masterResumeJson && options.applicationId) {
+    try {
+      const appRecord = await prisma.application.findUnique({
+        where: { id: options.applicationId },
+        include: { user: { include: { resumeVersions: true } } },
+      });
+      if (appRecord?.user) {
+        const activeVer = appRecord.user.resumeVersions.find((v: any) => v.isActive);
+        const rawJson = activeVer?.resumeJson || appRecord.user.resumeJson;
+        masterResumeText = activeVer?.resumeText || appRecord.user.resumeText || undefined;
+
+        if (rawJson) {
+          masterResumeJson = typeof rawJson === 'string' ? JSON.parse(rawJson) : rawJson;
+        }
+      }
+    } catch (e: any) {
+      console.warn(`[AgenticFiller] Error fetching user master resume from Prisma:`, e.message);
+    }
+  }
+
+  // FIX 1 Safeguard: If resumeJson is null/missing/empty, log warning and mark needs_manual_review
+  if (!masterResumeJson || (typeof masterResumeJson === 'object' && Object.keys(masterResumeJson).length === 0)) {
+    const errorMsg = `User master resumeJson is missing/null. Application marked for manual review to prevent submitting generic placeholder resume text.`;
+    console.warn(`[AgenticFiller] ⚠️ FIX 1 WARN: ${errorMsg}`);
+
+    if (options.applicationId) {
+      await prisma.application.update({
+        where: { id: options.applicationId },
+        data: {
+          status: 'needs_manual_review',
+          preSubmitGateFailure: 'UserProfile.resumeJson is null or missing.',
+          errorMessage: errorMsg,
+        },
+      }).catch(() => {});
+    }
+
+    return {
+      success: false,
+      isConfirmed: false,
+      failureReason: 'RESUME_MISSING',
+      preSubmitGateFailure: 'UserProfile.resumeJson is null or missing.',
+      error: errorMsg,
+    };
+  }
+
+  // Step 1: Resume Tailor Agent -> Generate customized ATS PDF Resume using authentic masterResumeJson
   let tailoredResumePath = applicant.resumePath;
   let tailoredSummary = '';
   let tailoredBullets: string[] = [];
@@ -365,6 +506,8 @@ export async function fillApplicationAgentically(options: AgenticFillOptions): P
       jobTitle,
       jobCompany,
       jobDescription,
+      masterResumeJson,
+      masterResumeText,
     });
     tailoredResumePath = tailored.pdfPath;
     tailoredSummary = tailored.tailoredSummary;
@@ -403,8 +546,8 @@ export async function fillApplicationAgentically(options: AgenticFillOptions): P
     const applyUrl = url;
     console.log(`[AgenticFiller] Navigating to ${applyUrl}`);
     
-    await page.goto(applyUrl, { waitUntil: 'networkidle', timeout: 30000 }).catch(async () => {
-      await page.goto(applyUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+    await page.goto(applyUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(async () => {
+      await page.goto(applyUrl, { waitUntil: 'networkidle', timeout: 30000 });
     });
 
     await page.waitForTimeout(2000);
@@ -426,6 +569,32 @@ export async function fillApplicationAgentically(options: AgenticFillOptions): P
     // Step 3: Form Inspector Agent -> Extract dynamic form layout schema
     const extractedFields = await extractFormFields(page);
 
+    // Guard: if too few fields extracted, the page likely isn't the application form
+    if (extractedFields.length < 3) {
+      const warnMsg = `FormInspector only extracted ${extractedFields.length} fields. Page may be a job listing, not an application form. URL: ${page.url()}`;
+      console.warn(`[AgenticFiller] ⚠️ ${warnMsg}`);
+
+      if (options.applicationId) {
+        await prisma.application.update({
+          where: { id: options.applicationId },
+          data: {
+            status: 'needs_manual_review',
+            errorMessage: warnMsg,
+            preSubmitGateFailure: 'Insufficient form fields detected. Application form may not have loaded.',
+          },
+        }).catch(() => {});
+      }
+
+      await browser.close();
+      return {
+        success: false,
+        isConfirmed: false,
+        failureReason: 'FORM_NOT_SUBMITTED',
+        error: warnMsg,
+        preSubmitGateFailure: 'Insufficient form fields detected.',
+      };
+    }
+
     // Step 4: Question Resolver Agent -> Generate action plan via LLM
     const actionPlan = await resolveFormQuestions({
       fields: extractedFields,
@@ -446,6 +615,63 @@ export async function fillApplicationAgentically(options: AgenticFillOptions): P
       try {
         if (action.actionType === 'autocomplete') {
           await handleLocationCombobox(page, action.valueToFill || updatedApplicant.location || 'San Francisco, CA');
+        } else if (action.actionType === 'select_option') {
+          let valToSelect = action.valueToFill || '';
+          if (!valToSelect || /no value|null|undefined/i.test(valToSelect)) {
+            valToSelect = 'Yes';
+          }
+          let selected = false;
+
+          if (action.selector) {
+            const el = page.locator(action.selector).first();
+            if (await el.isVisible().catch(() => false)) {
+              const tagName = await el.evaluate((node: HTMLElement) => node.tagName.toLowerCase()).catch(() => '');
+              if (tagName === 'select') {
+                const optSelected = await el.selectOption({ label: valToSelect }).catch(async () => {
+                  return await el.selectOption({ value: valToSelect }).catch(() => null);
+                });
+                if (!optSelected || optSelected.length === 0) {
+                  // Fall back to selecting option index 1 (first non-empty option)
+                  await el.selectOption({ index: 1 }).catch(() => {});
+                }
+                selected = true;
+                console.log(`[AgenticFiller] Selected option on <select> (${action.label}) -> ${valToSelect}`);
+              } else {
+                // Custom select trigger button / combobox
+                await el.scrollIntoViewIfNeeded().catch(() => {});
+                await el.click({ force: true }).catch(() => {});
+                await page.waitForTimeout(400);
+
+                const optionSel = `[role="option"]:has-text("${valToSelect}"), div[class*="option"]:has-text("${valToSelect}"), li:has-text("${valToSelect}"), button:has-text("${valToSelect}")`;
+                const opt = page.locator(optionSel).first();
+                if (await opt.isVisible({ timeout: 1500 }).catch(() => false)) {
+                  await opt.click({ force: true }).catch(() => {});
+                  selected = true;
+                  console.log(`[AgenticFiller] Selected option on custom dropdown (${action.label}) -> ${valToSelect}`);
+                } else {
+                  // Fall back to clicking first visible option in popover
+                  const firstOpt = page.locator('[role="option"], div[class*="option"], li[class*="option"]').first();
+                  if (await firstOpt.isVisible().catch(() => false)) {
+                    await firstOpt.click({ force: true }).catch(() => {});
+                    selected = true;
+                    console.log(`[AgenticFiller] Selected first option fallback on custom dropdown (${action.label})`);
+                  }
+                }
+              }
+            }
+          }
+
+          if (!selected && action.label) {
+            const escapedLabel = action.label.slice(0, 20).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const container = page.locator(`fieldset:has-text("${escapedLabel}"), div:has-text("${escapedLabel}")`).first();
+            if (await container.isVisible().catch(() => false)) {
+              const opt = container.locator(`option:has-text("${valToSelect}"), button:has-text("${valToSelect}"), label:has-text("${valToSelect}"), div:has-text("${valToSelect}")`).first();
+              if (await opt.isVisible().catch(() => false)) {
+                await opt.click({ force: true }).catch(() => {});
+                console.log(`[AgenticFiller] Selected option via container fallback (${action.label}) -> ${valToSelect}`);
+              }
+            }
+          }
         } else if (action.actionType === 'click_radio') {
           // Radio buttons or option buttons
           const radioBtn = page.locator(`button:has-text("${action.valueToFill}"), label:has-text("${action.valueToFill}"), input[value="${action.valueToFill}"]`).first();
@@ -455,7 +681,8 @@ export async function fillApplicationAgentically(options: AgenticFillOptions): P
             console.log(`[AgenticFiller] Selected Radio/Option (${action.label}) -> ${action.valueToFill}`);
           } else {
             // Search inside closest parent container
-            const targetContainer = page.locator(`fieldset:has-text("${action.label.slice(0, 20)}"), div:has-text("${action.label.slice(0, 20)}")`).first();
+            const escapedLabel = action.label.slice(0, 20).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const targetContainer = page.locator(`fieldset:has-text("${escapedLabel}"), div:has-text("${escapedLabel}")`).first();
             if (await targetContainer.isVisible().catch(() => false)) {
               const opt = targetContainer.locator(`label:has-text("${action.valueToFill}"), button:has-text("${action.valueToFill}")`).first();
               if (await opt.isVisible().catch(() => false)) {
@@ -494,7 +721,8 @@ export async function fillApplicationAgentically(options: AgenticFillOptions): P
           } else {
             // Label-based fallback
             const safeLabel = action.label || '';
-            const byLabel = page.getByLabel(new RegExp(safeLabel.slice(0, 20), 'i')).first();
+            const escapedLabel = safeLabel.slice(0, 20).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const byLabel = page.getByLabel(new RegExp(escapedLabel, 'i')).first();
             if (await byLabel.isVisible().catch(() => false)) {
               await byLabel.scrollIntoViewIfNeeded().catch(() => {});
               await byLabel.click({ force: true }).catch(() => {});
@@ -518,6 +746,154 @@ export async function fillApplicationAgentically(options: AgenticFillOptions): P
 
     // Step 6: Pre-Submit QA Self-Correction Pass
     await executePreSubmitSelfCorrection(page, updatedApplicant);
+
+    // FIX 3 / INTEGRATION: Pre-Submit Verification Gate (DOM -> Act -> Vision)
+    console.log('[AgenticFiller] 🛡️ Running Pre-Submit Gate Verification (DOM check -> Vision check)...');
+
+    // 1. validateDomBeforeSubmit
+    let domCheck = await validateDomBeforeSubmit(page, actionPlan);
+
+    // 2. Retry loop (max 1 retry round) if DOM check fails
+    if (!domCheck.ok) {
+      console.warn(`[AgenticFiller] ⚠️ DOM pre-submit check failed for missing fields: ${domCheck.missing.join(', ')}. Initiating 1 retry round...`);
+
+      const missingFields = extractedFields.filter(f => domCheck.missing.some(m => f.label.toLowerCase().includes(m.toLowerCase()) || m.toLowerCase().includes(f.label.toLowerCase())));
+      const retryFieldsToResolve = missingFields.length > 0 ? missingFields : extractedFields;
+
+      const retryActions = await resolveFormQuestions({
+        fields: retryFieldsToResolve,
+        applicant: updatedApplicant,
+        jobTitle,
+        jobCompany,
+        jobDescription,
+        tailoredSummary,
+        tailoredBullets,
+      });
+
+      for (const action of retryActions) {
+        if (action.actionType === 'skip') continue;
+        try {
+          if (action.actionType === 'type') {
+            const loc = page.locator(action.selector).first();
+            if (await loc.isVisible().catch(() => false)) {
+              await loc.fill(action.valueToFill || '').catch(() => {});
+            }
+          } else if (action.actionType === 'autocomplete') {
+            await handleLocationCombobox(page, action.valueToFill || updatedApplicant.location || 'San Francisco, CA');
+          } else if (action.actionType === 'click_radio') {
+            const radioBtn = page.locator(`button:has-text("${action.valueToFill}"), label:has-text("${action.valueToFill}"), input[value="${action.valueToFill}"]`).first();
+            if (await radioBtn.isVisible().catch(() => false)) {
+              await radioBtn.click().catch(() => {});
+            }
+          }
+        } catch (e: any) {}
+      }
+
+      await executePreSubmitSelfCorrection(page, updatedApplicant);
+      domCheck = await validateDomBeforeSubmit(page, actionPlan);
+    }
+
+    // 3. If DOM check still fails after retry round: skip vision, mark needs_manual_review, return early WITHOUT submit
+    if (!domCheck.ok) {
+      const gateErrorMsg = `Pre-submit DOM verification failed for unverified fields: ${domCheck.missing.join(', ')}`;
+      console.error(`[AgenticFiller] ❌ Pre-Submit Gate Failed (DOM): ${gateErrorMsg}`);
+
+      if (options.applicationId) {
+        await prisma.application.update({
+          where: { id: options.applicationId },
+          data: {
+            status: 'needs_manual_review',
+            preSubmitGateFailure: gateErrorMsg,
+            errorMessage: gateErrorMsg,
+          },
+        }).catch(() => {});
+      }
+
+      await browser.close();
+      return {
+        success: false,
+        isConfirmed: false,
+        failureReason: 'PRE_SUBMIT_GATE_FAILED',
+        preSubmitGateFailure: gateErrorMsg,
+        error: gateErrorMsg,
+      };
+    }
+
+    // 4. Run Vision Verification if DOM check passed
+    const visionCheck = await visionVerifyForm(page, actionPlan, updatedApplicant);
+
+    // 5. Targeted retry if vision check flagged issues
+    if (!visionCheck.ok) {
+      console.warn(`[AgenticFiller] ⚠️ Vision pre-submit check flagged issues: ${JSON.stringify(visionCheck.issues)}. Initiating targeted re-fill retry...`);
+
+      for (const issue of visionCheck.issues) {
+        const matchingAction = actionPlan.find(a =>
+          a.label.toLowerCase().includes(issue.field.toLowerCase()) ||
+          issue.field.toLowerCase().includes(a.label.toLowerCase())
+        );
+
+        if (matchingAction) {
+          const fieldToFix = extractedFields.find(f => f.fieldId === matchingAction.fieldId || f.label === matchingAction.label);
+          if (fieldToFix) {
+            const reResolved = await resolveFormQuestions({
+              fields: [fieldToFix],
+              applicant: updatedApplicant,
+              jobTitle,
+              jobCompany,
+              jobDescription,
+              tailoredSummary,
+              tailoredBullets,
+            });
+
+            for (const act of reResolved) {
+              if (act.actionType === 'type') {
+                const target = page.locator(act.selector).first();
+                if (await target.isVisible().catch(() => false)) {
+                  await target.fill(act.valueToFill || '').catch(() => {});
+                }
+              } else if (act.actionType === 'click_radio') {
+                const opt = page.locator(`button:has-text("${act.valueToFill}"), label:has-text("${act.valueToFill}")`).first();
+                if (await opt.isVisible().catch(() => false)) {
+                  await opt.click().catch(() => {});
+                }
+              }
+            }
+          }
+        }
+      }
+
+      // Re-run DOM validation on targeted fields (DOM-only for retry to control cost/latency)
+      const flaggedLabels = visionCheck.issues.map(i => i.field);
+      const flaggedActions = actionPlan.filter(a => flaggedLabels.some(fl => a.label.toLowerCase().includes(fl.toLowerCase()) || fl.toLowerCase().includes(a.label.toLowerCase())));
+      const domRetryCheck = await validateDomBeforeSubmit(page, flaggedActions.length > 0 ? flaggedActions : actionPlan);
+
+      if (!domRetryCheck.ok) {
+        const visionErrorMsg = `Pre-submit Vision verification failed: ${visionCheck.issues.map(i => `${i.field}: ${i.problem}`).join('; ')}`;
+        console.error(`[AgenticFiller] ❌ Pre-Submit Gate Failed (Vision): ${visionErrorMsg}`);
+
+        if (options.applicationId) {
+          await prisma.application.update({
+            where: { id: options.applicationId },
+            data: {
+              status: 'needs_manual_review',
+              preSubmitGateFailure: visionErrorMsg,
+              errorMessage: visionErrorMsg,
+            },
+          }).catch(() => {});
+        }
+
+        await browser.close();
+        return {
+          success: false,
+          isConfirmed: false,
+          failureReason: 'PRE_SUBMIT_GATE_FAILED',
+          preSubmitGateFailure: visionErrorMsg,
+          error: visionErrorMsg,
+        };
+      }
+    }
+
+    console.log('[AgenticFiller] ✅ Both Pre-Submit Gates passed! Proceeding to natural human dwell & submit click.');
 
     // Step 7: Simulate natural human scrolling & reading dwell time before submitting
     await humanScrollAndDwell(page, 4000, 7000);
@@ -544,24 +920,27 @@ export async function fillApplicationAgentically(options: AgenticFillOptions): P
         const submitBtn = page.locator('button[type="submit"], button:has-text("Submit"), button:has-text("Submit Application"), input[type="submit"]').first();
         if (await submitBtn.isVisible().catch(() => false)) {
           await humanMoveAndClick(page, submitBtn);
-          await page.waitForTimeout(6000);
+          await page.waitForTimeout(3000);
         }
       } else {
         console.log(`[AgenticFiller] Dry run mode - completed form filling without clicking final submit button.`);
       }
 
-      // Capture post-submission verification screenshot
-      finalScreenshotFileName = `agentic_${Date.now()}.png`;
-      finalScreenshotPath = path.join(screenshotsDir, finalScreenshotFileName);
-
-      await page.waitForTimeout(1000);
-      await page.screenshot({ path: finalScreenshotPath, fullPage: true });
-      console.log(`[AgenticFiller] Verification screenshot saved to: ${finalScreenshotPath}`);
-
-      // Verify submission outcome on page post-submit
+      // Verify submission outcome on page post-submit (includes DOM stabilization poll loop)
       verification = dryRun
         ? { success: true, isConfirmed: true, validationMessages: [] }
         : await verifySubmissionOutcome(page, url);
+
+      // Capture dedicated post-verification outcome screenshot
+      const prefix = verification.success ? 'success' : 'failure';
+      finalScreenshotFileName = `${prefix}_agentic_${Date.now()}.png`;
+      finalScreenshotPath = path.join(screenshotsDir, finalScreenshotFileName);
+
+      if (verification.success) {
+        await page.waitForTimeout(1500); // Allow thank-you UI animations to settle
+      }
+      await page.screenshot({ path: finalScreenshotPath, fullPage: true }).catch(() => {});
+      console.log(`[AgenticFiller] ${verification.success ? '✅ Success' : '❌ Failure'} verification screenshot saved to: ${finalScreenshotPath}`);
 
       if (verification.requiresOtp) {
         const targetAppId = options.applicationId || 'current_application';
@@ -590,7 +969,7 @@ export async function fillApplicationAgentically(options: AgenticFillOptions): P
         );
         console.log(`[AgenticFiller] 🛠️ Initiating post-submit DOM self-correction and retry...`);
 
-        const fixedCount = await handlePostSubmitValidationErrors(
+        await handlePostSubmitValidationErrors(
           page,
           verification.validationMessages,
           updatedApplicant

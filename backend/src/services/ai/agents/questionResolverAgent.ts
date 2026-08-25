@@ -68,13 +68,16 @@ STRICT RULES:
 3. For radio or select fields, pick the EXACT option text string from the field's "options" list.
 4. For location/address input, output candidate's city & state string (e.g. "${applicant.location || 'San Francisco, CA'}").
 
-Return ONLY valid JSON matching this schema:
+Return ONLY valid JSON matching this schema with NO markdown wrapping:
 [
   {
     "fieldId": "fieldId from input",
     "selector": "selector from input",
     "label": "label text",
     "actionType": "type | select_option | click_radio | autocomplete | upload_file | skip",
+    "valueToFill": "exact value to fill or select",
+    "reasoning": "brief explanation of why this value was chosen"
+  }
 ]`;
 
     const textContent = await generateLLMCompletion({
@@ -132,6 +135,45 @@ function heuristicResolveField(
     }
     const yesNoMatch = field.options.find(o => o.toLowerCase() === 'yes') || field.options[0];
     return { fieldId: field.fieldId, selector: field.selector, label: field.label, actionType: 'click_radio', valueToFill: yesNoMatch };
+  }
+
+  if (field.type === 'select' || (field.options && field.options.length > 0 && field.type !== 'radio')) {
+    let chosenVal = '';
+    const opts = field.options || [];
+
+    if (/gender/i.test(lbl)) {
+      chosenVal = opts.find(o => new RegExp(applicant.gender || 'decline', 'i').test(o)) || opts.find(o => /male|decline/i.test(o)) || opts[0];
+    } else if (/race|ethnicity/i.test(lbl)) {
+      chosenVal = opts.find(o => new RegExp(applicant.race || 'decline', 'i').test(o)) || opts.find(o => /asian|decline/i.test(o)) || opts[0];
+    } else if (/veteran/i.test(lbl)) {
+      chosenVal = opts.find(o => /not a protected|decline|no/i.test(o)) || opts[0];
+    } else if (/disability/i.test(lbl)) {
+      chosenVal = opts.find(o => /no, i don't|decline|no/i.test(o)) || opts[0];
+    } else if (/school|university|college/i.test(lbl)) {
+      chosenVal = opts.find(o => /other|stanford|berkeley|mit|university/i.test(o)) || opts[0];
+    } else if (/degree/i.test(lbl)) {
+      chosenVal = opts.find(o => /bachelor|master|bs|ba/i.test(o)) || opts[0];
+    } else if (/discipline|major/i.test(lbl)) {
+      chosenVal = opts.find(o => /computer science|software|engineering/i.test(o)) || opts[0];
+    } else if (/month/i.test(lbl)) {
+      chosenVal = opts.find(o => /may|june|december|05|06|12/i.test(o)) || opts[opts.length > 1 ? 1 : 0];
+    } else if (/year/i.test(lbl)) {
+      chosenVal = opts.find(o => /2026|2027|2025/i.test(o)) || opts[opts.length - 1];
+    } else if (/authorization|legally authorized|work in/i.test(lbl)) {
+      chosenVal = opts.find(o => /yes/i.test(o)) || opts[0];
+    } else if (/sponsorship/i.test(lbl)) {
+      chosenVal = opts.find(o => /yes/i.test(o)) || opts[0];
+    } else if (opts.length > 0) {
+      chosenVal = opts.find(o => /yes|united states|other|job board|linkedin/i.test(o)) || opts[0];
+    }
+
+    return {
+      fieldId: field.fieldId,
+      selector: field.selector,
+      label: field.label,
+      actionType: 'select_option',
+      valueToFill: chosenVal,
+    };
   }
 
   // Textarea / Open-ended prompt

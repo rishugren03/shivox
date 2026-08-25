@@ -49,8 +49,9 @@ export async function extractFormFields(page: Page): Promise<ExtractedFormField[
       const cleanLabel = labelText.replace(/\s+/g, ' ').trim();
 
       let normType: ExtractedFormField['type'] = 'text';
-      if (tagName === 'select') normType = 'select';
-      else if (rawType === 'textarea') normType = 'textarea';
+      if (tagName === 'select' || (el as HTMLElement).getAttribute('role') === 'combobox' || /select/i.test(el.className || '')) {
+        normType = 'select';
+      } else if (rawType === 'textarea') normType = 'textarea';
       else if (rawType === 'file') normType = 'file';
       else if (rawType === 'radio') normType = 'radio';
       else if (rawType === 'checkbox') normType = 'checkbox';
@@ -66,6 +67,15 @@ export async function extractFormFields(page: Page): Promise<ExtractedFormField[
       let options: string[] | undefined = undefined;
       if (tagName === 'select') {
         options = Array.from((el as HTMLSelectElement).options).map(o => o.text.trim()).filter(Boolean);
+      } else if (normType === 'select') {
+        // Search for sibling or parent container option lists
+        const container = el.closest('div[class*="field"], div[class*="question"], div[class*="select"], fieldset');
+        if (container) {
+          const optEls = Array.from(container.querySelectorAll('option, [role="option"], [class*="option"]'));
+          if (optEls.length > 0) {
+            options = optEls.map(o => o.textContent?.trim() || '').filter(Boolean);
+          }
+        }
       }
 
       // Unique CSS Selector
@@ -99,15 +109,22 @@ export async function extractFormFields(page: Page): Promise<ExtractedFormField[
       });
 
       if (options.length > 0 && legend) {
-        extracted.push({
-          selector: `div[role="radiogroup"]:nth-of-type(${gIdx + 1})`,
-          fieldId: `radio_group_${gIdx}`,
-          name: legend,
-          type: 'radio',
-          label: legend,
-          options,
-          required: legend.includes('*') || /required/i.test(legend),
-        });
+        // Deduplicate: skip if an individual radio input with the same label already exists
+        const legendLower = legend.toLowerCase().replace(/[*\s]+/g, ' ').trim();
+        const alreadyExists = extracted.some(f =>
+          f.type === 'radio' && f.label.toLowerCase().replace(/[*\s]+/g, ' ').trim() === legendLower
+        );
+        if (!alreadyExists) {
+          extracted.push({
+            selector: `div[role="radiogroup"]:nth-of-type(${gIdx + 1})`,
+            fieldId: `radio_group_${gIdx}`,
+            name: legend,
+            type: 'radio',
+            label: legend,
+            options,
+            required: legend.includes('*') || /required/i.test(legend),
+          });
+        }
       }
     });
 

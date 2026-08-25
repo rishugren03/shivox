@@ -206,6 +206,8 @@ export async function fillAshbyApplication(
     }
 
     // 4. Custom Questions & Textareas (e.g. "Why Braintrust?", "Why this role?")
+    // Guard: skip fields that expect specific non-prose answers
+    const SKIP_LABEL_PATTERNS = /twitter|salary|compensation|referral|code|handle|username|url|link|social|pay|wage|how did you hear|source|where did you/i;
     try {
       const textareas = page.locator('textarea, input[type="text"]:not([name*="name"]):not([name*="email"]):not([name*="phone"]):not([name*="location"]):not([name*="linkedin"]):not([name*="github"]):not([name*="website"])');
       const count = await textareas.count();
@@ -215,6 +217,13 @@ export async function fillAshbyApplication(
         const currentVal = await input.inputValue().catch(() => '');
         if (!currentVal) {
           const label = await input.evaluate(el => el.closest('div, label')?.textContent?.slice(0, 100) || '').catch(() => '');
+          
+          // Skip fields that expect specific answers (URLs, salaries, referral codes, etc.)
+          if (SKIP_LABEL_PATTERNS.test(label)) {
+            console.log(`[AshbyFiller] Skipped non-prose field (${label.slice(0, 30)}...) to avoid content mismatch.`);
+            continue;
+          }
+
           let answer = "I am deeply interested in joining your team to contribute to building reliable, high-performance software systems and AI features. My technical background directly matches your requirements.";
           if (applicant.coverNote && /cover|additional|notes/i.test(label)) {
             answer = applicant.coverNote;
@@ -245,22 +254,26 @@ export async function fillAshbyApplication(
       console.log(`[AshbyFiller] Dry run mode - filled form without clicking final submit.`);
     }
 
-    // Verification screenshot (captured after submit in live mode, or pre-submit in dryRun)
+    // Verify submission outcome on page post-submit (includes DOM stabilization poll loop)
+    const verification = dryRun
+      ? { success: true, isConfirmed: true, validationMessages: [] }
+      : await verifySubmissionOutcome(page, applyUrl);
+
+    // Capture post-verification outcome screenshot
     const screenshotsDir = path.join(__dirname, '../../../uploads/screenshots');
     if (!fs.existsSync(screenshotsDir)) {
       fs.mkdirSync(screenshotsDir, { recursive: true });
     }
 
-    const screenshotFileName = `ashby_${Date.now()}.png`;
+    const prefix = verification.success ? 'success' : 'failure';
+    const screenshotFileName = `${prefix}_ashby_${Date.now()}.png`;
     const screenshotPath = path.join(screenshotsDir, screenshotFileName);
-    
-    await page.waitForTimeout(1000);
-    await page.screenshot({ path: screenshotPath, fullPage: true });
 
-    // Verify submission outcome on page post-submit
-    const verification = dryRun
-      ? { success: true, isConfirmed: true, validationMessages: [] }
-      : await verifySubmissionOutcome(page, applyUrl);
+    if (verification.success) {
+      await page.waitForTimeout(1500); // Allow thank-you UI animations to settle
+    }
+    await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
+    console.log(`[AshbyFiller] ${verification.success ? '✅ Success' : '❌ Failure'} verification screenshot saved to: ${screenshotPath}`);
 
     await browser.close();
     return {

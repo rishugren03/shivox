@@ -26,9 +26,10 @@ export interface SubmissionResult {
   isConfirmed?: boolean;
   requiresOtp?: boolean;
   otpEmail?: string;
-  failureReason?: 'SPAM_FLAGGED' | 'VALIDATION_ERRORS' | 'RESUME_MISSING' | 'FORM_NOT_SUBMITTED' | 'UNKNOWN';
+  failureReason?: 'SPAM_FLAGGED' | 'VALIDATION_ERRORS' | 'RESUME_MISSING' | 'FORM_NOT_SUBMITTED' | 'PRE_SUBMIT_GATE_FAILED' | 'UNKNOWN';
   validationMessages?: string[];
   screenshotUrl?: string;
   error?: string;
   submittedAt?: Date;
+  preSubmitGateFailure?: string;
 }

@@ -126,22 +126,26 @@ export async function fillLeverApplication(
       console.log(`[LeverFiller] Dry run mode - filled form without clicking final submit.`);
     }
 
-    // Verification screenshot (captured after submit in live mode, or pre-submit in dryRun)
+    // Verify submission outcome on page post-submit (includes DOM stabilization poll loop)
+    const verification = dryRun
+      ? { success: true, isConfirmed: true, validationMessages: [] }
+      : await verifySubmissionOutcome(page, applyUrl);
+
+    // Capture post-verification outcome screenshot
     const screenshotsDir = path.join(__dirname, '../../../uploads/screenshots');
     if (!fs.existsSync(screenshotsDir)) {
       fs.mkdirSync(screenshotsDir, { recursive: true });
     }
 
-    const screenshotFileName = `lever_${Date.now()}.png`;
+    const prefix = verification.success ? 'success' : 'failure';
+    const screenshotFileName = `${prefix}_lever_${Date.now()}.png`;
     const screenshotPath = path.join(screenshotsDir, screenshotFileName);
-    
-    await page.waitForTimeout(1000);
-    await page.screenshot({ path: screenshotPath, fullPage: true });
 
-    // Verify submission outcome on page post-submit
-    const verification = dryRun
-      ? { success: true, isConfirmed: true, validationMessages: [] }
-      : await verifySubmissionOutcome(page, applyUrl);
+    if (verification.success) {
+      await page.waitForTimeout(1500); // Allow thank-you UI animations to settle
+    }
+    await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
+    console.log(`[LeverFiller] ${verification.success ? '✅ Success' : '❌ Failure'} verification screenshot saved to: ${screenshotPath}`);
 
     await browser.close();
     return {

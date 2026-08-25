@@ -131,22 +131,26 @@ export async function fillGreenhouseApplication(
       console.log(`[GreenhouseFiller] Dry run mode - filled form without clicking final submit.`);
     }
 
-    // Take verification screenshot (captured after submit in live mode, or pre-submit in dryRun)
+    // Verify submission outcome on page post-submit (includes DOM stabilization poll loop)
+    const verification = dryRun
+      ? { success: true, isConfirmed: true, validationMessages: [] }
+      : await verifySubmissionOutcome(page, url);
+
+    // Capture post-verification outcome screenshot
     const screenshotsDir = path.join(__dirname, '../../../uploads/screenshots');
     if (!fs.existsSync(screenshotsDir)) {
       fs.mkdirSync(screenshotsDir, { recursive: true });
     }
 
-    const screenshotFileName = `greenhouse_${Date.now()}.png`;
+    const prefix = verification.success ? 'success' : 'failure';
+    const screenshotFileName = `${prefix}_greenhouse_${Date.now()}.png`;
     const screenshotPath = path.join(screenshotsDir, screenshotFileName);
-    
-    await page.waitForTimeout(1000);
-    await page.screenshot({ path: screenshotPath, fullPage: true });
 
-    // Verify submission outcome on page post-submit
-    const verification = dryRun
-      ? { success: true, isConfirmed: true, validationMessages: [] }
-      : await verifySubmissionOutcome(page, url);
+    if (verification.success) {
+      await page.waitForTimeout(1500); // Allow thank-you UI animations to settle
+    }
+    await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
+    console.log(`[GreenhouseFiller] ${verification.success ? '✅ Success' : '❌ Failure'} verification screenshot saved to: ${screenshotPath}`);
 
     await browser.close();
     return {
