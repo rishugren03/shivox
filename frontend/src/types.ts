@@ -77,6 +77,7 @@ export interface Application {
   matchReason?: string;
   whyFit?: string;
   tailoredJson?: string[] | string;
+  submittedResumeUrl?: string;
   coverNote?: string;
   submittedAt?: string;
   screenshotUrl?: string;

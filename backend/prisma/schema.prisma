@@ -103,8 +103,9 @@ model Application {
   status        String      // queued | tailoring | pending_review | approved | submitted | replied | interview | failed | passed
   matchScore    Float?
   matchReason   String?
-  tailoredJson  String?
-  coverNote     String?
+  tailoredJson         String?
+  submittedResumeUrl   String?
+  coverNote            String?
   submittedAt   DateTime?
   screenshotUrl String?
   errorMessage  String?

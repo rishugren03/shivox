@@ -103,6 +103,48 @@ export const applicationWorker = new Worker<ApplicationJobData>(
       jobPosting.description
     );
 
+    let submittedResumeUrl = activeResumeVersion?.fileUrl || user.resumeFileUrl || '';
+
+    // Generate tailored PDF if missing keywords need to be incorporated
+    if (tailored.requiresTailoring) {
+      try {
+        const { generateTailoredResume } = await import('../services/ai/agents/resumeTailorAgent');
+        const applicantInfo = {
+          fullName: user.fullName || 'Candidate',
+          email: user.email || '',
+          phone: user.phone || '',
+          linkedinUrl: user.linkedinUrl || '',
+          githubUrl: user.githubUrl || '',
+          portfolioUrl: user.portfolioUrl || '',
+          location: user.location || '',
+          coverNote: tailored.coverNote || '',
+          legallyAuthorized: user.legallyAuthorized ?? true,
+          requiresSponsorship: user.requiresSponsorship ?? false,
+          openToRelocation: user.openToRelocation ?? true,
+          openToInPerson: user.openToInPerson ?? true,
+        };
+
+        const tailoredResult = await generateTailoredResume({
+          applicant: applicantInfo,
+          jobTitle: jobPosting.title,
+          jobCompany: jobPosting.company.name,
+          jobDescription: jobPosting.description,
+          masterResumeJson: userResumeJson,
+          masterResumeText: userResumeText,
+          tailoredBullets: tailored.tailoredBullets,
+          tailoredSkills: tailored.tailoredSkills,
+        });
+
+        if (tailoredResult.pdfPath) {
+          submittedResumeUrl = `/uploads/resumes/${path.basename(tailoredResult.pdfPath)}`;
+        }
+      } catch (err: any) {
+        console.warn(`[BullMQ Worker] Tailored PDF generation warning (${err.message}). Falling back to master resume URL.`);
+      }
+    } else {
+      console.log(`[BullMQ Worker] No missing keywords for "${jobPosting.title}". Submitted resume set to Master Resume: ${submittedResumeUrl}`);
+    }
+
     const updatedStatus = autoSubmit || user.autoApplyEnabled ? 'approved' : 'pending_review';
 
     await prisma.application.update({
@@ -112,6 +154,7 @@ export const applicationWorker = new Worker<ApplicationJobData>(
         matchScore,
         matchReason,
         tailoredJson: JSON.stringify(tailored.tailoredBullets),
+        submittedResumeUrl,
         coverNote: tailored.coverNote,
       },
     });
@@ -120,6 +163,12 @@ export const applicationWorker = new Worker<ApplicationJobData>(
     if (autoSubmit || user.autoApplyEnabled) {
       console.log(`[BullMQ Worker] Auto-submitting application ${applicationId} to ${jobPosting.company.name}`);
       
+      const resumeLocalPath = submittedResumeUrl
+        ? path.join(__dirname, '../../', submittedResumeUrl.replace(/^\//, ''))
+        : user.resumeFileUrl
+        ? path.join(__dirname, '../../uploads', path.basename(user.resumeFileUrl))
+        : undefined;
+
       const applicantInfo = {
         fullName: user.fullName || 'Candidate',
         email: user.email || '',
@@ -129,7 +178,7 @@ export const applicationWorker = new Worker<ApplicationJobData>(
         portfolioUrl: user.portfolioUrl || '',
         location: user.location || '',
         coverNote: tailored.coverNote || '',
-        resumePath: user.resumeFileUrl ? path.join(__dirname, '../../uploads', path.basename(user.resumeFileUrl)) : undefined,
+        resumePath: resumeLocalPath,
         legallyAuthorized: user.legallyAuthorized ?? true,
         requiresSponsorship: user.requiresSponsorship ?? false,
         openToRelocation: user.openToRelocation ?? true,

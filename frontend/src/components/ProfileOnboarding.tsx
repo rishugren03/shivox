@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
-import type { UserProfile } from '../types';
-import { Upload, FileText, User, Mail, Sparkles, Sliders, Briefcase, MapPin, DollarSign, CheckCircle2, ShieldCheck } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import type { UserProfile, ResumeVersion } from '../types';
+import { Upload, FileText, User, Mail, Sparkles, Sliders, Briefcase, MapPin, DollarSign, CheckCircle2, ShieldCheck, Check, ExternalLink } from 'lucide-react';
 import axios from 'axios';
 
 interface ProfileOnboardingProps {
@@ -34,6 +34,45 @@ export const ProfileOnboarding: React.FC<ProfileOnboardingProps> = ({ profile, o
   const [activeSubTab, setActiveSubTab] = useState<'preferences' | 'details' | 'eligibility' | 'resume'>('preferences');
   const [uploading, setUploading] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
+  const [resumeVersions, setResumeVersions] = useState<ResumeVersion[]>([]);
+
+  const fetchResumeVersions = async () => {
+    try {
+      const res = await axios.get('http://localhost:5001/api/resume/versions', {
+        headers: getHeaders(),
+      });
+      if (res.data.versions) {
+        setResumeVersions(res.data.versions);
+      }
+    } catch (err) {
+      console.error('Error fetching resume versions:', err);
+    }
+  };
+
+  useEffect(() => {
+    fetchResumeVersions();
+  }, []);
+
+  const handleActivateVersion = async (versionId: string) => {
+    try {
+      const res = await axios.post(`http://localhost:5001/api/resume/versions/${versionId}/activate`, {}, {
+        headers: getHeaders(),
+      });
+      if (res.data.success) {
+        fetchResumeVersions();
+        if (profile) {
+          onProfileUpdated({
+            ...profile,
+            resumeFileUrl: res.data.activeVersion.fileUrl,
+            resumeText: res.data.activeVersion.resumeText,
+            resumeJson: JSON.parse(res.data.activeVersion.resumeJson || '{}'),
+          });
+        }
+      }
+    } catch (err) {
+      console.error('Error activating resume version:', err);
+    }
+  };
 
   // Helper to parse arrays from JSON strings or arrays
   const parseArr = (val: any, fallback: string[]) => {
@@ -772,6 +811,80 @@ export const ProfileOnboarding: React.FC<ProfileOnboardingProps> = ({ profile, o
                     </span>
                   ))}
                 </div>
+              </div>
+
+              {/* MASTER RESUMES MANAGEMENT (LinkedIn style) */}
+              <div className="bg-white rounded-3xl p-6 border border-neutral-200 shadow-sm space-y-4">
+                <div className="border-b border-neutral-100 pb-3 flex items-center justify-between">
+                  <div>
+                    <h3 className="text-base font-extrabold text-neutral-900 flex items-center gap-2">
+                      <FileText className="w-4.5 h-4.5 text-red-600" />
+                      Uploaded Master Resumes ({resumeVersions.length})
+                    </h3>
+                    <p className="text-xs text-neutral-500 font-medium">Select which master resume Tsenta uses as your active base profile</p>
+                  </div>
+                </div>
+
+                {resumeVersions.length === 0 ? (
+                  <p className="text-xs text-neutral-400 font-medium py-2">No uploaded master resumes found yet. Upload one above!</p>
+                ) : (
+                  <div className="space-y-3">
+                    {resumeVersions.map((version) => (
+                      <div
+                        key={version.id}
+                        className={`p-4 rounded-2xl border transition-all flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 ${
+                          version.isActive
+                            ? 'bg-emerald-50/40 border-emerald-300 ring-2 ring-emerald-500/10 shadow-sm'
+                            : 'bg-neutral-50 border-neutral-200 hover:border-neutral-300'
+                        }`}
+                      >
+                        <div className="flex items-center gap-3 min-w-0">
+                          <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
+                            version.isActive ? 'bg-emerald-600 text-white font-bold' : 'bg-neutral-200 text-neutral-600'
+                          }`}>
+                            <FileText className="w-5 h-5" />
+                          </div>
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                              <h4 className="text-xs sm:text-sm font-extrabold text-neutral-900 truncate">
+                                {version.fileName || 'Master Resume.pdf'}
+                              </h4>
+                              {version.isActive && (
+                                <span className="px-2.5 py-0.5 rounded-full bg-emerald-600 text-white text-[10px] font-black uppercase tracking-wider flex items-center gap-1">
+                                  <Check className="w-3 h-3" /> Active Master
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-[11px] text-neutral-500 font-medium mt-0.5">
+                              Uploaded on {new Date(version.uploadedAt).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
+                          <a
+                            href={`http://localhost:5001${version.fileUrl}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="px-3 py-1.5 rounded-xl bg-white border border-neutral-300 hover:border-neutral-400 text-neutral-700 text-xs font-extrabold transition-all flex items-center gap-1"
+                          >
+                            <ExternalLink className="w-3.5 h-3.5" />
+                            View
+                          </a>
+                          {!version.isActive && (
+                            <button
+                              type="button"
+                              onClick={() => handleActivateVersion(version.id)}
+                              className="px-3.5 py-1.5 rounded-xl bg-neutral-900 hover:bg-neutral-800 text-white text-xs font-extrabold shadow-sm transition-all"
+                            >
+                              Set as Active
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           )}

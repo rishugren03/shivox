@@ -40,7 +40,10 @@ export interface ParsedResume {
 }
 
 export interface TailoredMaterials {
+  requiresTailoring: boolean;
+  missingKeywords: string[];
   tailoredBullets: string[];
+  tailoredSkills?: string[];
   coverNote: string;
   shortAnswers?: Record<string, string>;
 }
@@ -148,13 +151,52 @@ export async function tailorResumeForJob(
   jobTitle: string,
   jobDescription: string
 ): Promise<TailoredMaterials> {
+  const masterSkills: string[] = resume?.skills || [];
+  const masterText = (rawResumeText || JSON.stringify(resume)).toLowerCase();
+
+  // Extract key technical terms from job description & title
+  const commonTechTerms = [
+    'Python', 'PyTorch', 'TensorFlow', 'TypeScript', 'JavaScript', 'React', 'Node.js',
+    'Voice AI', 'LLMs', 'Agentic Workflows', 'PostgreSQL', 'Docker', 'AWS', 'GCP',
+    'Express', 'Next.js', 'Playwright', 'FastAPI', 'GraphQL', 'Redis', 'Kubernetes',
+    'LangChain', 'LlamaIndex', 'WebSockets', 'REST APIs', 'SQL', 'NoSQL', 'CI/CD',
+    'System Architecture', 'Microservices', 'Distributed Systems', 'RAG', 'Vector DB',
+  ];
+
+  const jdText = `${jobTitle} ${jobDescription}`;
+  const requiredKeywordsInJd = commonTechTerms.filter((term) =>
+    new RegExp(`\\b${term.replace('.', '\\.')}\\b`, 'i').test(jdText)
+  );
+
+  // Find missing keywords in candidate's master resume
+  const missingKeywords = requiredKeywordsInJd.filter(
+    (kw) => !masterText.includes(kw.toLowerCase()) && !masterSkills.some((s) => s.toLowerCase() === kw.toLowerCase())
+  );
+
+  console.log(`[ResumeTailorEngine] Target: "${jobTitle}". JD Keywords: [${requiredKeywordsInJd.join(', ')}]. Missing: [${missingKeywords.join(', ')}]`);
+
+  // If no significant missing keywords (less than 2 missing or no major gaps), apply directly with master resume!
+  if (missingKeywords.length === 0) {
+    console.log('[ResumeTailorEngine] No significant missing keywords detected. Using Master Resume directly.');
+    return {
+      requiresTailoring: false,
+      missingKeywords: [],
+      tailoredBullets: resume?.experience?.flatMap((e: any) => e.bullets || []) || [],
+      tailoredSkills: masterSkills,
+      coverNote: `I am thrilled to apply for the ${jobTitle} role. My experience building scalable software and AI systems aligns directly with your team's technical stack.`,
+    };
+  }
+
   if (!openai) {
     const defaultBullets = resume?.experience?.[0]?.bullets || [
       `Engineered software systems aligned with ${jobTitle} requirements.`,
       `Optimized data pipelines and high-throughput application workflows.`,
     ];
     return {
+      requiresTailoring: true,
+      missingKeywords,
       tailoredBullets: defaultBullets,
+      tailoredSkills: Array.from(new Set([...masterSkills, ...missingKeywords])),
       coverNote: `I am thrilled to apply for the ${jobTitle} role. My experience building scalable software and AI pipelines aligns directly with your team's goals.`,
     };
   }
@@ -165,45 +207,58 @@ export async function tailorResumeForJob(
       : [];
 
     const prompt = `You are an expert AI resume editor.
-CRITICAL INSTRUCTION: You MUST base your rewrites directly on candidate's original experience bullets and raw resume text provided below. DO NOT invent fake roles, companies, or accomplishments. Preserve candidate's authentic background while rewriting bullets to emphasize relevant keywords from the Job Description.
+CRITICAL MANDATE:
+- You MUST base your edits strictly on candidate's original experience bullets and master resume text below.
+- DO NOT invent fake job titles, companies, dates of employment, degrees, or accomplishments.
+- Your ONLY task is to seamlessly incorporate the following MISSING KEYWORDS into relevant existing bullet points and skills, preserving candidate's authentic career facts.
 
-Candidate Raw Resume Text:
+Missing Keywords to Include: ${missingKeywords.join(', ')}
+
+Candidate Master Resume Text:
 ${rawResumeText.slice(0, 3000)}
 
 Candidate Original Experience Bullets:
 ${JSON.stringify(originalBullets)}
 
 Target Job Title: ${jobTitle}
-Target Job Description: ${jobDescription.slice(0, 2000)}
+Target Job Description: ${jobDescription.slice(0, 1500)}
 
 Return ONLY valid JSON matching this schema:
 {
   "tailoredBullets": [
-    "Rewritten original bullet 1 incorporating JD keywords while keeping true facts",
-    "Rewritten original bullet 2",
-    "Rewritten original bullet 3"
+    "Original bullet 1 reworded to naturally include missing keyword while keeping true facts",
+    "Original bullet 2",
+    "Original bullet 3"
   ],
+  "tailoredSkills": ["Skill 1", "Skill 2"],
   "coverNote": "3-4 sentence concise, high-impact cover note expressing genuine alignment with the role."
 }`;
 
     const response = await openai.chat.completions.create({
       model: 'gpt-4o-mini',
       messages: [{ role: 'user', content: prompt }],
-      temperature: 0.5,
+      temperature: 0.3,
       max_tokens: 1000,
       response_format: { type: 'json_object' },
     });
 
     const textContent = response.choices[0]?.message?.content || '{}';
-    return JSON.parse(textContent);
-  } catch (err: any) {
-    console.warn(`[OpenAIService] Tailoring error (${err.message}). Using local fallback.`);
-    const fallbackBullets = resume?.experience?.[0]?.bullets || [
-      `Architected scalable software and AI systems for ${jobTitle}.`,
-      `Integrated production pipelines to streamline operational workflows.`,
-    ];
+    const parsed = JSON.parse(textContent);
+
     return {
-      tailoredBullets: fallbackBullets,
+      requiresTailoring: true,
+      missingKeywords,
+      tailoredBullets: parsed.tailoredBullets || originalBullets,
+      tailoredSkills: parsed.tailoredSkills || Array.from(new Set([...masterSkills, ...missingKeywords])),
+      coverNote: parsed.coverNote || `I am excited to apply for ${jobTitle}. My technical background makes me a strong fit for your team.`,
+    };
+  } catch (err: any) {
+    console.warn(`[OpenAIService] Tailoring error (${err.message}). Using master fallback.`);
+    return {
+      requiresTailoring: true,
+      missingKeywords,
+      tailoredBullets: resume?.experience?.[0]?.bullets || [],
+      tailoredSkills: Array.from(new Set([...masterSkills, ...missingKeywords])),
       coverNote: `I am excited to apply for ${jobTitle}. My technical background makes me a strong fit for your team.`,
     };
   }

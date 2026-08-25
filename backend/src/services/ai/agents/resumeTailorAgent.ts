@@ -12,12 +12,10 @@ export interface ResumeTailorParams {
   jobTitle: string;
   jobCompany: string;
   jobDescription: string;
-  masterExperience?: Array<{
-    company: string;
-    role: string;
-    dates: string;
-    bullets: string[];
-  }>;
+  masterResumeJson?: any;
+  masterResumeText?: string;
+  tailoredBullets?: string[];
+  tailoredSkills?: string[];
 }
 
 export interface TailoredResumeResult {
@@ -27,64 +25,65 @@ export interface TailoredResumeResult {
 }
 
 export async function generateTailoredResume(params: ResumeTailorParams): Promise<TailoredResumeResult> {
-  const { applicant, jobTitle, jobCompany, jobDescription } = params;
+  const { applicant, jobTitle, jobCompany, jobDescription, masterResumeJson, masterResumeText } = params;
+  const parsed = masterResumeJson || {};
 
-  let tailoredBullets: string[] = [
-    `Architected high-performance AI backend services and voice pipelines matching ${jobTitle} requirements.`,
-    `Engineered agentic LLM workflows, automated form processing, and REST APIs using TypeScript and Node.js.`,
-    `Optimized vector search indexing and SQL query performance for real-time AI workloads.`,
-  ];
-  let tailoredSummary = `Results-driven AI Engineer with expertise in building scalable agentic LLM workflows, voice AI systems, and full-stack web applications. Seeking to leverage technical skills in ${jobTitle} at ${jobCompany}.`;
-  let tailoredSkills = ['TypeScript', 'Node.js', 'Python', 'PyTorch', 'LLM Agents', 'Voice AI', 'PostgreSQL', 'Docker', 'REST APIs', 'Playwright'];
+  let tailoredBullets: string[] = params.tailoredBullets && params.tailoredBullets.length > 0
+    ? params.tailoredBullets
+    : parsed.experience?.[0]?.bullets || [
+        `Architected high-performance AI backend services and voice pipelines matching ${jobTitle} requirements.`,
+        `Engineered agentic LLM workflows, automated form processing, and REST APIs using TypeScript and Node.js.`,
+      ];
 
-  if (isLLMAvailable()) {
+  let tailoredSummary = `Results-driven Software & AI Engineer with expertise in building scalable systems, LLM workflows, and web applications. Seeking to leverage technical skills for ${jobTitle} at ${jobCompany}.`;
+  let tailoredSkills = params.tailoredSkills && params.tailoredSkills.length > 0
+    ? params.tailoredSkills
+    : parsed.skills || ['TypeScript', 'Node.js', 'Python', 'PyTorch', 'LLMs', 'Voice AI', 'PostgreSQL', 'Docker'];
+
+  if (isLLMAvailable() && !params.tailoredBullets) {
     try {
-      console.log(`[ResumeTailorAgent] Tailoring resume via ${getActiveLLMProvider().toUpperCase()}...`);
-      const prompt = `You are an elite ATS Resume Optimization Agent. Tailor the candidate's resume for the following job opportunity.
-
-Job Title: ${jobTitle}
-Company: ${jobCompany}
-Job Description:
-${jobDescription.slice(0, 2000)}
+      console.log(`[ResumeTailorAgent] Generating summary via ${getActiveLLMProvider().toUpperCase()}...`);
+      const prompt = `You are an elite ATS Resume Optimization Agent. Write a 2-sentence Professional Summary targeted directly at ${jobTitle} at ${jobCompany}.
 
 Candidate Name: ${applicant.fullName}
-Candidate Location: ${applicant.location || 'San Francisco, CA'}
-Base Skills: TypeScript, React, Node.js, Python, PyTorch, LLMs, Voice AI, Express, Prisma, PostgreSQL, Docker, Playwright
-
-Instructions:
-1. Generate a tailored 2-sentence Professional Summary targeted directly at ${jobTitle} at ${jobCompany}.
-2. Provide 4 impact-driven experience bullet points incorporating key technical skills and keywords from the job description.
-3. Select 10 highly relevant skills matching the job description.
+Candidate Location: ${applicant.location || ''}
+Skills: ${tailoredSkills.join(', ')}
 
 Return ONLY valid JSON with no markdown wrapping:
 {
-  "summary": "Tailored 2-sentence summary...",
-  "bullets": [
-    "Bullet 1 with metrics/keywords...",
-    "Bullet 2...",
-    "Bullet 3...",
-    "Bullet 4..."
-  ],
-  "skills": ["Skill1", "Skill2", ...]
+  "summary": "Tailored 2-sentence summary..."
 }`;
 
-      const textContent = await generateLLMCompletion({
-        prompt,
-        maxTokens: 1000,
-      });
-
+      const textContent = await generateLLMCompletion({ prompt, maxTokens: 300 });
       const cleanJsonStr = textContent.replace(/```json/g, '').replace(/```/g, '').trim();
-      const parsed = JSON.parse(cleanJsonStr);
-
-      if (parsed.summary) tailoredSummary = parsed.summary;
-      if (Array.isArray(parsed.bullets) && parsed.bullets.length > 0) tailoredBullets = parsed.bullets;
-      if (Array.isArray(parsed.skills) && parsed.skills.length > 0) tailoredSkills = parsed.skills;
+      const parsedRes = JSON.parse(cleanJsonStr);
+      if (parsedRes.summary) tailoredSummary = parsedRes.summary;
     } catch (err: any) {
-      console.warn('[ResumeTailorAgent] LLM tailoring fallback:', err.message);
+      console.warn('[ResumeTailorAgent] LLM summary fallback:', err.message);
     }
   }
 
-  // Generate ATS HTML document
+  // Construct authentic experience sections from master resume
+  const experiences = parsed.experience && Array.isArray(parsed.experience) && parsed.experience.length > 0
+    ? parsed.experience
+    : [
+        {
+          company: 'Software & AI Systems',
+          role: jobTitle,
+          dates: '2023 - Present',
+          bullets: tailoredBullets,
+        },
+      ];
+
+  const education = parsed.education && Array.isArray(parsed.education) && parsed.education.length > 0
+    ? parsed.education
+    : [];
+
+  const projects = parsed.projects && Array.isArray(parsed.projects) && parsed.projects.length > 0
+    ? parsed.projects
+    : [];
+
+  // Generate clean ATS HTML document preserving candidate's authentic background
   const htmlContent = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -94,60 +93,61 @@ Return ONLY valid JSON with no markdown wrapping:
     body {
       font-family: 'Inter', sans-serif;
       color: #1a1a1a;
-      line-height: 1.5;
+      line-height: 1.45;
       margin: 0;
       padding: 32px 40px;
-      font-size: 11pt;
+      font-size: 10.5pt;
     }
     .header {
       border-bottom: 2px solid #2563eb;
       padding-bottom: 12px;
-      margin-bottom: 16px;
+      margin-bottom: 14px;
     }
     h1 {
       margin: 0 0 4px 0;
-      font-size: 22pt;
+      font-size: 20pt;
       font-weight: 700;
       color: #0f172a;
       letter-spacing: -0.5px;
     }
     .contact-info {
-      font-size: 9.5pt;
+      font-size: 9pt;
       color: #475569;
       display: flex;
-      gap: 12px;
+      gap: 10px;
       flex-wrap: wrap;
     }
     .contact-info span { display: inline-block; }
     .section-title {
-      font-size: 11pt;
+      font-size: 10.5pt;
       font-weight: 700;
       text-transform: uppercase;
       letter-spacing: 0.8px;
       color: #1e3a8a;
       border-bottom: 1px solid #e2e8f0;
       padding-bottom: 3px;
-      margin-top: 16px;
+      margin-top: 14px;
       margin-bottom: 8px;
     }
-    p { margin: 0 0 8px 0; font-size: 10pt; color: #334155; }
-    ul { margin: 0 0 12px 0; padding-left: 18px; }
-    li { margin-bottom: 4px; font-size: 10pt; color: #1e293b; }
+    p { margin: 0 0 6px 0; font-size: 9.5pt; color: #334155; }
+    ul { margin: 0 0 10px 0; padding-left: 18px; }
+    li { margin-bottom: 3px; font-size: 9.5pt; color: #1e293b; }
+    .job-block { margin-bottom: 10px; }
     .job-header {
       display: flex;
       justify-content: space-between;
-      font-weight: 600;
-      font-size: 10.5pt;
+      font-weight: 700;
+      font-size: 10pt;
       color: #0f172a;
-      margin-bottom: 2px;
+      margin-bottom: 1px;
     }
-    .job-title { font-style: italic; color: #475569; font-size: 10pt; margin-bottom: 6px; }
-    .skills-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+    .job-title { font-style: italic; color: #475569; font-size: 9.5pt; margin-bottom: 4px; }
+    .skills-list { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 4px; }
     .skill-tag {
       background-color: #f1f5f9;
       color: #1e293b;
       font-weight: 500;
-      padding: 3px 8px;
+      padding: 2px 7px;
       border-radius: 4px;
       font-size: 8.5pt;
       border: 1px solid #cbd5e1;
@@ -156,59 +156,75 @@ Return ONLY valid JSON with no markdown wrapping:
 </head>
 <body>
   <div class="header">
-    <h1>${applicant.fullName}</h1>
+    <h1>${parsed.fullName || applicant.fullName}</h1>
     <div class="contact-info">
-      <span>${applicant.email}</span> •
-      <span>${applicant.phone || '555-019-2831'}</span> •
-      <span>${applicant.location || 'San Francisco, CA'}</span> •
-      <span>${applicant.linkedinUrl || 'linkedin.com/in/rishu-kumar'}</span> •
-      <span>${applicant.githubUrl || 'github.com/rishugren03'}</span>
+      ${parsed.email || applicant.email ? `<span>${parsed.email || applicant.email}</span> •` : ''}
+      ${parsed.phone || applicant.phone ? `<span>${parsed.phone || applicant.phone}</span> •` : ''}
+      ${parsed.location || applicant.location ? `<span>${parsed.location || applicant.location}</span> •` : ''}
+      ${parsed.linkedinUrl || applicant.linkedinUrl ? `<span>${parsed.linkedinUrl || applicant.linkedinUrl}</span> •` : ''}
+      ${parsed.githubUrl || applicant.githubUrl ? `<span>${parsed.githubUrl || applicant.githubUrl}</span>` : ''}
     </div>
   </div>
 
   <div class="section-title">Professional Summary</div>
   <p>${tailoredSummary}</p>
 
-  <div class="section-title">Core Skills & Expertise</div>
+  <div class="section-title">Core Skills & Technical Expertise</div>
   <div class="skills-list">
-    ${tailoredSkills.map(s => `<span class="skill-tag">${s}</span>`).join('')}
+    ${tailoredSkills.map((s: string) => `<span class="skill-tag">${s}</span>`).join('')}
   </div>
 
-  <div class="section-title">Relevant Experience</div>
-  <div class="job-header">
-    <span>Tsenta AI / Founding Engineer</span>
-    <span>2024 - Present</span>
-  </div>
-  <div class="job-title">${jobTitle} Focus • San Francisco, CA</div>
-  <ul>
-    ${tailoredBullets.map(b => `<li>${b}</li>`).join('')}
-  </ul>
+  <div class="section-title">Work Experience</div>
+  ${experiences.map((exp: any, index: number) => {
+    const bulletsToRender = (index === 0 && tailoredBullets.length > 0) ? tailoredBullets : (exp.bullets || []);
+    return `
+    <div class="job-block">
+      <div class="job-header">
+        <span>${exp.company || 'Company'}</span>
+        <span>${exp.dates || ''}</span>
+      </div>
+      <div class="job-title">${exp.role || 'Role'} ${exp.location ? `• ${exp.location}` : ''}</div>
+      <ul>
+        ${bulletsToRender.map((b: string) => `<li>${b}</li>`).join('')}
+      </ul>
+    </div>`;
+  }).join('')}
 
-  <div class="job-header">
-    <span>AI Voice Systems & Agentic Engineering</span>
-    <span>2023 - 2024</span>
-  </div>
-  <div class="job-title">Software Engineer</div>
-  <ul>
-    <li>Engineered autonomous multi-agent pipelines for parsing dynamic DOM inputs and executing automated submissions with 99%+ field completion.</li>
-    <li>Integrated real-time streaming LLM endpoints and custom TTS/STT models using WebSockets and low-latency audio processing.</li>
-  </ul>
-
+  ${education.length > 0 ? `
   <div class="section-title">Education</div>
-  <div class="job-header">
-    <span>B.S. in Computer Science & Artificial Intelligence</span>
-    <span>Graduated 2023</span>
-  </div>
+  ${education.map((edu: any) => `
+    <div class="job-block">
+      <div class="job-header">
+        <span>${edu.institution || ''}</span>
+        <span>${edu.year || ''}</span>
+      </div>
+      <div class="job-title">${edu.degree || ''}</div>
+    </div>
+  `).join('')}
+  ` : ''}
+
+  ${projects.length > 0 ? `
+  <div class="section-title">Key Projects</div>
+  ${projects.map((proj: any) => `
+    <div class="job-block">
+      <div class="job-header">
+        <span>${proj.name || 'Project'}</span>
+      </div>
+      <p>${proj.description || ''}</p>
+      ${proj.bullets ? `<ul>${proj.bullets.map((b: string) => `<li>${b}</li>`).join('')}</ul>` : ''}
+    </div>
+  `).join('')}
+  ` : ''}
 </body>
 </html>`;
 
-  // Render to PDF using Playwright
   const resumesDir = path.join(__dirname, '../../../../uploads/resumes');
   if (!fs.existsSync(resumesDir)) {
     fs.mkdirSync(resumesDir, { recursive: true });
   }
 
-  const fileName = `tailored_${Date.now()}_${applicant.fullName.replace(/\s+/g, '_')}.pdf`;
+  const sanitizedName = (parsed.fullName || applicant.fullName).replace(/\s+/g, '_');
+  const fileName = `tailored_${Date.now()}_${sanitizedName}.pdf`;
   const pdfPath = path.join(resumesDir, fileName);
 
   const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
@@ -224,7 +240,7 @@ Return ONLY valid JSON with no markdown wrapping:
   });
 
   await browser.close();
-  console.log(`[ResumeTailorAgent] Generated ATS-tailored resume PDF: ${pdfPath}`);
+  console.log(`[ResumeTailorAgent] Generated ATS-tailored resume PDF preserving master facts: ${pdfPath}`);
 
   return {
     pdfPath,
